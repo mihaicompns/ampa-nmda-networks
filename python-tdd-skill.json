@@ -1,0 +1,61 @@
+{
+  "name": "test-driven-development",
+  "description": "Drives development with tests. Use when implementing any logic, fixing any bug, or changing any behavior. Use when you need to prove that code works, when a bug report arrives, or when you're about to modify existing functionality.",
+  "author": "Assistant",
+  "domain": "software-engineering",
+  "capabilities": [
+    "Test-driven development cycle implementation",
+    "Bug fix validation with reproduction tests",
+    "Test pyramid application (unit/integration/E2E)",
+    "Test quality assurance (DAMP over DRY)",
+    "Test anti-pattern avoidance",
+    "Python-specific testing frameworks (pytest, unittest)",
+    "Arrange-Act-Assert pattern implementation",
+    "One assertion per concept principle",
+    "Descriptive test naming conventions",
+    "Real implementation preference over mocks"
+  ],
+  "trigger_keywords": [
+    "tdd",
+    "test driven development",
+    "write test first",
+    "red green refactor",
+    "prove it pattern",
+    "bug fix with test",
+    "test before code",
+    "python tdd",
+    "pytest tdd",
+    "unittest tdd",
+    "test driven development python"
+  ],
+  "tags": [
+    "testing",
+    "tdd",
+    "python",
+    "software-engineering",
+    "best-practices",
+    "quality-assurance"
+  ],
+  "dependencies": {
+    "required": [
+      "python >= 3.8"
+    ],
+    "optional": [
+      "pytest >= 6.0",
+      "unittest (stdlib)"
+    ]
+  },
+  "cli_alias": "tdd",
+  "input_formats": [
+    {
+      "format": "Python source file or project",
+      "extension": ".py",
+      "required_fields": "Python code to develop or test",
+      "example": "src/module.py"
+    }
+  ],
+  "chaining_partners": [
+    "bio-orchestrator",
+    "skill-builder"
+  ]
+}

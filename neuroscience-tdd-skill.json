@@ -1,0 +1,50 @@
+{
+  "name": "neuroscience-tdd",
+  "description": "Test-Driven Development approach for computational neuroscience models, focusing on biophysical validity and mathematical correctness",
+  "author": "Assistant",
+  "domain": "computational-neuroscience",
+  "capabilities": [
+    "Biophysical model validation",
+    "Mathematical correctness testing", 
+    "Unit test generation for neural models",
+    "Refactoring with test safety nets",
+    "Scientific reproducibility checks"
+  ],
+  "trigger_keywords": [
+    "neuroscience tdd",
+    "test driven neural model",
+    "biophysical validation",
+    "computational neuroscience testing",
+    "neural model refactoring"
+  ],
+  "tags": [
+    "testing",
+    "neuroscience",
+    "tdd",
+    "biophysics",
+    "model-validation"
+  ],
+  "dependencies": {
+    "required": [
+      "numpy >= 1.20",
+      "scipy >= 1.7",
+      "unittest (stdlib)"
+    ],
+    "optional": [
+      "pytest >= 6.0",
+      "brian2 >= 2.0"
+    ]
+  },
+  "cli_alias": "neurotdd",
+  "input_formats": [
+    {
+      "format": "Neuroscience model Python file",
+      "extension": ".py",
+      "required_fields": "Mathematical functions, biophysical parameters",
+      "example": "TaperedDendrites.py"
+    }
+  ],
+  "chaining_partners": [
+    "bio-orchestrator"
+  ]
+}

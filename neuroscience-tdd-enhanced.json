@@ -1,0 +1,68 @@
+{
+  "name": "neuroscience-tdd",
+  "description": "Test-Driven Development approach for computational neuroscience models, focusing on biophysical validity and mathematical correctness using Python-specific TDD practices.",
+  "author": "Assistant",
+  "domain": "computational-neuroscience",
+  "capabilities": [
+    "Biophysical model validation using TDD",
+    "Mathematical correctness testing with pytest/unittest",
+    "Unit test generation for neural models following DAMP principle",
+    "Refactoring with test safety nets (Red-Green-Refactor cycle)",
+    "Scientific reproducibility checks through executable tests",
+    "Bug fix validation with reproduction tests (Prove-It Pattern)",
+    "Test pyramid application in neuroscience context",
+    "Arrange-Act-Assert pattern for clear test structure",
+    "One assertion per concept principle",
+    "Descriptive test naming for scientific clarity",
+    "Real implementation preference over mocks in neuroscience testing",
+    "Test anti-pattern avoidance (no testing framework code, no snapshot abuse)",
+    "Python-specific testing tools (pytest, unittest, hypothesis)"
+  ],
+  "trigger_keywords": [
+    "neuroscience tdd",
+    "test driven neural model",
+    "biophysical validation",
+    "computational neuroscience testing",
+    "neural model refactoring",
+    "python neuroscience tdd",
+    "pytest neuroscience",
+    "unittest neuroscience",
+    "tdd computational neuroscience",
+    "scientific model validation"
+  ],
+  "tags": [
+    "testing",
+    "tdd",
+    "neuroscience",
+    "python",
+    "biophysics",
+    "model-validation",
+    "scientific-computing"
+  ],
+  "dependencies": {
+    "required": [
+      "python >= 3.8",
+      "numpy >= 1.20",
+      "scipy >= 1.7"
+    ],
+    "optional": [
+      "pytest >= 6.0",
+      "unittest (stdlib)",
+      "hypothesis >= 6.0"
+    ]
+  },
+  "cli_alias": "neurotdd",
+  "input_formats": [
+    {
+      "format": "Neuroscience model Python file",
+      "extension": ".py",
+      "required_fields": "Mathematical functions, biophysical parameters, testable hypotheses",
+      "example": "TaperedDendrites.py"
+    }
+  ],
+  "chaining_partners": [
+    "bio-orchestrator",
+    "test-driven-development",
+    "skill-builder"
+  ]
+}
