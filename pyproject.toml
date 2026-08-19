@@ -19,6 +19,7 @@ dependencies = [
 
     "brian2",
     "opencv-python",
+    "scipy",
 
     "h5py",
 

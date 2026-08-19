@@ -103,6 +103,57 @@ def refined_membrane_properties(x, lambda_val):
     return effective_tau, effective_phi, base_chi
 ```
 
+## Testing Simulation Functions: Short Tests vs. Long-Running Scripts
+
+Full research simulations in this project run for minutes to hours. That's incompatible with a
+test suite that should run on every change, so every simulation-driving method gets **two**
+callers instead of one:
+
+- A **test** (`test_*.py`, pytest-discovered) that calls the method with a *short* time budget —
+  `to_SI(0.001 * second)` or less — and checks the result against a numerically frozen answer.
+- A **script** (`*Scripts.py`, `*TestCases.py`, `*Tests.py`, or anything under `scripts/`) that
+  calls the *same* method with the real, long research time budget. Scripts are for a human to
+  run by hand (`python3 file.py`); their filenames don't match pytest's `test_*.py`/`*_test.py`
+  discovery pattern, so they never slow down or block the automated suite, no matter how long
+  they run.
+
+### What "input data" means for a simulation
+
+Every simulation here is driven by exactly three inputs:
+
+1. **Geometry** — cable/dendrite shape (`CableParameters`, `ConicalNumericalCableParameters`, etc.)
+2. **Cell properties** — membrane time constant, resistance, capacitance, channel densities
+3. **Spike train** — the sequence of synaptic events driving the simulation
+
+A short test fixes all three as literal, static data instead of generating them:
+
+- Geometry and cell properties: a small, hand-picked parameter instance (few compartments, short
+  cable) — not the full-resolution production geometry.
+- Spike train: a **literal, hardcoded array of events** written directly in the test — *not*
+  produced by a `generate_*`/random/Poisson spike-train function. A generated train is
+  nondeterministic (or at best a black box); a static train is something you can read straight out
+  of the test and reason about.
+
+### Workflow: visualize once, then freeze with numpy assertions
+
+For each simulation-driving method (Crank-Nicolson step, forward-Euler step, event injection, ...):
+
+1. Write a short test that builds a static spike train plus minimal geometry/cell properties and
+   runs the method for `to_SI(0.001 * second)` (or less) of simulated time.
+2. Run it once and **look at the plot** — confirm by eye that the output is biophysically sane
+   (correct sign, plausible magnitude, no NaNs/blow-ups, expected shape).
+3. Once satisfied, freeze that visually-confirmed output as the expected result with
+   `numpy.testing.assert_allclose` (or `assert_array_equal` where exact reproducibility applies).
+   This becomes the permanent, automated regression check. Don't re-derive expected values
+   analytically unless an analytical solution already exists (e.g. the Tuckwell closed-cable
+   checks in `TestPDECases.py`) — the goal here is to lock in "known good," not re-prove the math.
+4. Keep the test itself fast: short simulated time, small geometry, no plotting inside the test —
+   plotting is for the one-time visual check while authoring it, not for every pytest run.
+
+This gives every simulation method a fast, deterministic pytest test that catches regressions
+immediately, while the real long research runs stay in scripts — run by hand, on demand, without
+slowing down `pytest`.
+
 ## Benefits of TDD in Neuroscience Modeling
 
 1. **Scientific Rigor**: Explicitly testable hypotheses
