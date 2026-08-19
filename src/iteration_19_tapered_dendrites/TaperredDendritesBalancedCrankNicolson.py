@@ -15,8 +15,12 @@ events, just with a flipped sign - there is no separate inhibitory current ampli
 field on ConicalNumericalCableParameters. Revisit if a different E/I magnitude is needed.
 """
 
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
 import numpy as np
-from brian2 import second, Hz, um, meter, have_same_dimensions
+from brian2 import second, ms, Hz, um, meter, have_same_dimensions
+from brian2.units.allunits import pampere
 from scipy.stats import expon, uniform
 from scipy.sparse import diags, eye
 from scipy.sparse.linalg import factorized
@@ -24,7 +28,7 @@ from scipy.sparse.linalg import factorized
 from conical_data import ConicalNumericalCableParameters, create_delta_pulses
 from data import to_SI
 from CylindricalDendritesPDE import dirac_delta_unitless
-from TaperredDendritesPDE import save_simulation, plot_difussion_unitless_spike_train
+from TaperredDendritesPDE import save_simulation, plot_difussion_unitless_spike_train, default_params
 
 
 def experiment_label_for_uniform_balance(e_limits, i_limits):
@@ -226,3 +230,70 @@ def simulate_balanced_input_with_uniform(p: ConicalNumericalCableParameters, t_m
         save=True,
         saved_frames=3 * 10 ** 4,
         simulation_label=experiment_label_for_uniform_balance(e_limits, i_limits))
+
+
+@dataclass(frozen=True)
+class BalancedUniformSimulationMetadata:
+    """
+    Everything needed to fully specify and deterministically reproduce a balanced
+    excitatory/inhibitory tapered-dendrite simulation with uniformly-distributed
+    spike train positions.
+    """
+    t_max: float  # seconds, SI
+    e_limits: Tuple[float, float]  # meters, SI
+    i_limits: Tuple[float, float]  # meters, SI
+    seed: int
+    x_N: int = 101
+    dt: float = to_SI(0.001 * ms)  # seconds, SI
+    L: float = to_SI(500 * um)  # meters, SI
+    I_e: float = to_SI(150 * pampere)  # amperes, SI
+    saved_frames: int = 1200
+    simulation_label: Optional[str] = None
+
+
+def run_balanced_uniform_tapered_simulation(metadata: BalancedUniformSimulationMetadata,
+                                             verbose=True, plot=False, save=False):
+    """
+    Generate deterministic excitatory/inhibitory spike trains from metadata, build the
+    tapered cable geometry it describes, and run the real balanced Crank-Nicolson
+    simulation - given the same metadata, the result is fully reproducible.
+
+    create_delta_pulses uses its own numpy Generator internally and ignores the
+    ambient np.random.seed(), so metadata.seed is passed to it explicitly (with a
+    +1 offset for the inhibitory stream so the two event trains aren't identical).
+    """
+    e_left, e_right = metadata.e_limits
+    i_left, i_right = metadata.i_limits
+
+    r_e_density = 0.02 * Hz / um
+    r_i_density = 0.01 * Hz / um
+    r_e = r_e_density * (e_right - e_left) * meter
+    r_i = r_i_density * (i_right - i_left) * meter
+
+    exc_x_distribution = uniform(loc=e_left, scale=e_right - e_left)
+    inh_x_distribution = uniform(loc=i_left, scale=i_right - i_left)
+
+    spike_train_excitatory = create_delta_pulses(
+        t_max=metadata.t_max, x_distribution=exc_x_distribution,
+        t_distribution=expon(scale=1.0 / r_e), seed=metadata.seed)
+    spike_train_inhibitory = create_delta_pulses(
+        t_max=metadata.t_max, x_distribution=inh_x_distribution,
+        t_distribution=expon(scale=1.0 / r_i), seed=metadata.seed + 1)
+
+    p = default_params.with_SI_properties(
+        t=metadata.t_max, N=metadata.x_N, dt=metadata.dt, L=metadata.L, I_e=metadata.I_e
+    ).to_numerical()
+
+    label = metadata.simulation_label or experiment_label_for_uniform_balance(
+        metadata.e_limits, metadata.i_limits)
+
+    return simulate_crank_nicolson_unitless_closed_tapered_cylinder_balance_with_param(
+        p=p,
+        excitatory_events=spike_train_excitatory,
+        inhibitory_events=spike_train_inhibitory,
+        t_max=metadata.t_max,
+        saved_frames=metadata.saved_frames,
+        verbose=verbose,
+        plot=plot,
+        save=save,
+        simulation_label=label)
