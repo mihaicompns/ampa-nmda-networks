@@ -1,5 +1,5 @@
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 from brian2 import (
@@ -10,7 +10,7 @@ from brian2 import (
     siemens,
     second,
 )
-from brian2.units.allunits import ampere
+from brian2.units.allunits import ampere, pampere
 
 from iteration_19_tapered_dendrites.data import to_SI, CableParameters
 
@@ -58,6 +58,8 @@ class ConicalNumericalCableParameters:
 
     I_e : float
         External current [A].
+    I_i : float
+        Inhibitory current [A].
 
     t : float
         Simulation time [s].
@@ -83,6 +85,7 @@ class ConicalNumericalCableParameters:
     r_at_L: float            # m
 
     I_e: float            # A
+    I_i: float = to_SI(30 * pampere)  # A
 
     t: float = 0.003      # s
     dt: float = 3e-6      # s
@@ -103,7 +106,8 @@ class ConicalNumericalCableParameters:
             f"  r0  = {self.r_at_0:.4e} m\n"
             f"  rL  = {self.r_at_L:.4e} m\n"
             f"  k   = {self.k:.4e} 1/m\n"
-            f"  Ie  = {self.I_e:.4e} A"
+            f"  Ie  = {self.I_e:.4e} A\n"
+            f"  Ii  = {self.I_i:.4e} A"
         )
 
     # --------------------------------------------------------
@@ -275,6 +279,7 @@ class ConicalNumericalCableParameters:
             b=None,
 
             I_e=self.I_e,
+            I_i=self.I_i,
 
             t=self.t,
             dt=self.dt,
@@ -283,6 +288,16 @@ class ConicalNumericalCableParameters:
         )
 
         return local.to_numerical()
+
+    def to_numerical_cylindrical_params(self, x0=0.0):
+        """
+        Convert this conical cable to a cylindrical cable for comparison.
+
+        The cylinder keeps the same electrical properties, length, grid, time
+        step, and input strength. Its radius is constant and equal to the cone
+        radius at x0. By default x0=0, so the cylinder uses the proximal radius.
+        """
+        return self.to_numerical_cable_params_at(x0)
 
 
 # ============================================================
@@ -321,6 +336,7 @@ class ConicalCableParameters:
     r_at_L: Quantity | None = None
 
     I_e: Quantity | None = None
+    I_i: Quantity | None = field(default_factory=lambda: 30 * pampere)
 
     t: Quantity | None = None
     dt: Quantity | None = None
@@ -410,6 +426,7 @@ class ConicalCableParameters:
             f"  rL  = {self.r_at_L}\n"
             f"  k   = {self.k}\n"
             f"  I_e = {self.I_e}\n"
+            f"  I_i = {self.I_i}\n"
             f"  t   = {self.t}\n"
             f"  dt  = {self.dt}\n"
         )
@@ -575,6 +592,10 @@ class ConicalCableParameters:
                 self.I_e,
                 ampere
             ),
+            I_i=to_SI(
+                self.I_i,
+                ampere
+            ),
 
             t=to_SI(
                 self.t,
@@ -617,6 +638,7 @@ class ConicalCableParameters:
         rL=None,
 
         I_e=None,
+        I_i=to_SI(30 * pampere),
 
         t=None,
         dt=None):
@@ -689,6 +711,11 @@ class ConicalCableParameters:
             if I_e is None
             else I_e * ampere
         )
+        I_i = (
+            30 * pampere
+            if I_i is None
+            else I_i * ampere
+        )
 
         t = (
             None
@@ -719,6 +746,7 @@ class ConicalCableParameters:
             r_at_L=rL,
 
             I_e=I_e,
+            I_i=I_i,
 
             t=t,
             dt=dt,
@@ -754,6 +782,7 @@ class ConicalCableParameters:
             rL=other.r_at_L,
 
             I_e=other.I_e,
+            I_i=getattr(other, "I_i", to_SI(30 * pampere)),
 
             t=other.t,
             dt=other.dt,
@@ -825,6 +854,9 @@ class ConicalCableParameters:
                 converted[key] = value * meter
 
             elif key == "I_e":
+                converted[key] = value * ampere
+
+            elif key == "I_i":
                 converted[key] = value * ampere
 
             elif key == "N":

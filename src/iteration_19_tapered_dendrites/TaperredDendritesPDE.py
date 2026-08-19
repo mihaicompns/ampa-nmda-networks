@@ -183,7 +183,10 @@ def plot_difussion_unitless(times, V_s, p: ConicalNumericalCableParameters, x0 =
     plot_tuckwell_solution_closed_cable_unitless_separation_of_variables(V_s=V_s, desired_positions=desired_positions, p=p.to_numerical_cable_params_at(x0), t0=t0, times=times, x0=x0, sim_type=sim_type)
     plot_tuckwell_solution_closed_cable_unitless_method_of_images(V_s=V_s, desired_positions=desired_positions, p=p.to_numerical_cable_params_at(x0), t0=t0, times=times, x0=x0, sim_type=sim_type)
 
-def plot_difussion_unitless_spike_train(times, V_s, p: ConicalNumericalCableParameters, events, desired_positions = [100, 250, 500], verbose=True, sim_type="forward Euler", save=True):
+def plot_difussion_unitless_spike_train(
+        times, V_s, p: ConicalNumericalCableParameters, events,
+        desired_positions=[100, 250, 500], verbose=True, sim_type="forward Euler",
+        save=True, save_name=None, out_dir=None, show=True):
 
     _, n_events = events.shape
 
@@ -199,7 +202,10 @@ def plot_difussion_unitless_spike_train(times, V_s, p: ConicalNumericalCablePara
                                                                       p=p.to_numerical_cable_params_at(x0), t0=t0,
                                                                       times=times, x0=x0, sim_type=sim_type)
 
-    show_difussion_simulation_as_image_spike_train(times=times, V_s = V_s, p=p, events=events, desired_positions=desired_positions, verbose=verbose, sim_type=sim_type)
+    show_difussion_simulation_as_image_spike_train(
+        times=times, V_s=V_s, p=p, events=events, desired_positions=desired_positions,
+        verbose=verbose, sim_type=sim_type, save=save, save_name=save_name,
+        out_dir=out_dir, show=show)
         #plot_tuckwell_solution_infinite_cable(V_s=V_s, desired_positions=desired_positions, p=p, t0=t0, times=times, x0=x0, sim_type=sim_type)
 
 
@@ -357,7 +363,10 @@ def show_difussion_simulation_as_image(times, V_s, p: ConicalNumericalCableParam
     plt.tight_layout()
     show_plots_non_blocking()
 
-def show_difussion_simulation_as_image_spike_train(times, V_s, p: ConicalNumericalCableParameters, events: np.ndarray, desired_positions: list, verbose=True, sim_type="forward Euler"):
+def show_difussion_simulation_as_image_spike_train(
+        times, V_s, p: ConicalNumericalCableParameters, events: np.ndarray,
+        desired_positions: list, verbose=True, sim_type="forward Euler",
+        save=True, save_name=None, out_dir=None, show=True):
     if verbose:
         assert is_dimensionless(V_s[0][0])
         assert is_dimensionless(times[0])
@@ -501,7 +510,154 @@ def show_difussion_simulation_as_image_spike_train(times, V_s, p: ConicalNumeric
     # ax2.set_aspect('equal', adjustable='box')
 
     plt.tight_layout()
-    show_plots_non_blocking()
+    show_plots_non_blocking(
+        show=show,
+        save_name=save_name if save else None,
+        out_dir=out_dir,
+    )
+
+
+def plot_difussion_unitless_balanced_spike_trains(
+        times, V_s, p: ConicalNumericalCableParameters, excitatory_events,
+        inhibitory_events, desired_positions=[100, 250, 500], verbose=True,
+        sim_type="Crank-Nicolson balanced", save=True, save_name=None,
+        out_dir=None, show=True):
+    show_difussion_simulation_as_image_balanced_spike_trains(
+        times=times,
+        V_s=V_s,
+        p=p,
+        excitatory_events=excitatory_events,
+        inhibitory_events=inhibitory_events,
+        desired_positions=desired_positions,
+        verbose=verbose,
+        sim_type=sim_type,
+        save=save,
+        save_name=save_name,
+        out_dir=out_dir,
+        show=show,
+    )
+
+
+def show_difussion_simulation_as_image_balanced_spike_trains(
+        times, V_s, p: ConicalNumericalCableParameters, excitatory_events,
+        inhibitory_events, desired_positions: list, verbose=True,
+        sim_type="Crank-Nicolson balanced", save=True, save_name=None,
+        out_dir=None, show=True):
+    if verbose:
+        assert is_dimensionless(V_s[0][0])
+        assert is_dimensionless(times[0])
+
+    plt.rcParams.update({
+        "text.usetex": True,
+        "font.family": "serif",
+    })
+
+    fig = plt.figure(figsize=(13, 12))
+    gs = fig.add_gridspec(
+        5, 1,
+        height_ratios=[2, 2, 2, 2, 1]
+    )
+
+    voltage_diffussion_image = fig.add_subplot(gs[0, 0])
+    voltage_at_selected_spots = fig.add_subplot(gs[1, 0])
+    plot_voltage_means = fig.add_subplot(gs[2, 0], sharex=voltage_diffussion_image)
+    raster_plot = fig.add_subplot(gs[3, 0], sharex=voltage_diffussion_image)
+    dendrite_geometry = fig.add_subplot(gs[4, 0], sharex=voltage_diffussion_image)
+
+    x = p.x * meter / um
+    r_of_x = p.radius(p.x) * meter / um
+    times_ms = times * second / ms
+    V_s_mV = V_s * volt / mV
+
+    im = voltage_diffussion_image.imshow(
+        V_s_mV,
+        aspect='auto',
+        origin='lower',
+        extent=[x[0], x[-1], times_ms[0], times_ms[-1]],
+        cmap='cividis_r',
+        vmax=1000
+    )
+    fig.colorbar(im, ax=voltage_diffussion_image, label="Voltage (mV)")
+
+    voltage_diffussion_image.set_title(
+        f"{sim_type.capitalize()} simulation for cable equation in tapered conical model \n"
+        f"x = [{x[0]} - {x[-1]:.2f}] "r"$\mu$"f"m, split in {len(x)} nodes. \n"
+        f"Max V = {np.max(V_s_mV):.4f} mV. dx={p.dx * meter / um: .5f} "r"$\mu$"f"m, dt={p.dt: .3e} s \n"
+        f""
+    )
+    voltage_diffussion_image.set_xlabel(r"x [$\mu$m]")
+    voltage_diffussion_image.set_ylabel("t [ms]")
+
+    for desired_distance in desired_positions:
+        i = min(np.searchsorted(x, desired_distance), len(x) - 1)
+        voltage_at_selected_spots.plot(
+            times_ms,
+            V_s_mV[:, i],
+            label=f"x = {x[i]:.0f} "r"$\mu$ m",
+            alpha=0.6,
+            lw=2
+        )
+
+    voltage_at_selected_spots.set_ylim(-1, 1000)
+    voltage_at_selected_spots.set_xlabel("t [ms]")
+    voltage_at_selected_spots.set_ylabel("V [mV]")
+    voltage_at_selected_spots.set_title("Voltage at selected positions")
+    voltage_at_selected_spots.legend()
+
+    half_time = int(V_s_mV.shape[0] // 2)
+    voltage_means = np.average(V_s_mV[half_time:, :], axis=0)
+    plot_voltage_means.plot(x, voltage_means)
+    plot_voltage_means.set_title("Voltage means")
+
+    excitatory_events = np.asarray(excitatory_events)
+    inhibitory_events = np.asarray(inhibitory_events)
+    if excitatory_events.size:
+        raster_plot.scatter(
+            excitatory_events[1] / um,
+            excitatory_events[0] / ms,
+            s=15,
+            marker="|",
+            linewidths=1.5,
+            color="red",
+            label="Excitatory"
+        )
+    if inhibitory_events.size:
+        raster_plot.scatter(
+            inhibitory_events[1] / um,
+            inhibitory_events[0] / ms * -1,
+            s=15,
+            marker="|",
+            linewidths=1.5,
+            color="blue",
+            label="Inhibitory"
+        )
+
+    time_limit_ms = max(float(times_ms[-1]), 1e-12)
+    tick_position = (2.0 / 3.0) * time_limit_ms
+    raster_plot.set_yticks([-tick_position, tick_position])
+    raster_plot.set_yticklabels(["Inhibitory", "Excitatory"])
+    raster_plot.set_ylim(-time_limit_ms, time_limit_ms)
+    raster_plot.set_xlim(0, p.L / um)
+    raster_plot.set_xlabel(r"$x\;[\mu\mathrm{m}]$")
+    raster_plot.set_ylabel(r"$t\;[\mathrm{ms}]$")
+    raster_plot.set_title("Space-time raster of synaptic events")
+    raster_plot.legend()
+
+    dendrite_geometry.plot(x, r_of_x, 'k', linewidth=2)
+    dendrite_geometry.plot(x, -r_of_x, 'k', linewidth=2)
+    dendrite_geometry.fill_between(x, -r_of_x, r_of_x, color='gray', alpha=0.3)
+    dendrite_geometry.axhline(0, color='gray', linestyle=':', linewidth=1.5)
+    dendrite_geometry.axvline(0, color='gray', linestyle='--', linewidth=1.5)
+    dendrite_geometry.set_xlabel("x")
+    dendrite_geometry.set_ylabel("radius")
+    dendrite_geometry.set_title("Cable geometry")
+
+    plt.tight_layout()
+    show_plots_non_blocking(
+        show=show,
+        save_name=save_name if save else None,
+        out_dir=out_dir,
+    )
 
 rm = 2 * 1E4 * ohm * cm ** 2
 

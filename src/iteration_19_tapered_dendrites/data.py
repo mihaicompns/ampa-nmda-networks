@@ -1,8 +1,8 @@
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from brian2 import Quantity, farad, meter, ohm, siemens, second, have_same_dimensions, volt, is_dimensionless
-from brian2.units.allunits import ampere
+from brian2.units.allunits import ampere, pampere
 from dataclasses import replace
 import numpy as np
 
@@ -93,6 +93,7 @@ class NumericalCableParameters:
     b: float  # m^2/s
 
     I_e: float  # A
+    I_i: float = to_SI(30 * pampere)  # A
     t: float = 0.003  # seconds
     dt: float = 3E-6  # seconds
     x: np.ndarray | None = None
@@ -108,7 +109,8 @@ class NumericalCableParameters:
             f"  dx  = {self.dx:.4e} m\n"
             f"  tau = {self.tau:.4e} s\n"
             f"  b   = {self.b:.4e} m²/s\n"
-            f"  Ie  = {self.I_e:.4e} A"
+            f"  Ie  = {self.I_e:.4e} A\n"
+            f"  Ii  = {self.I_i:.4e} A"
         )
 
     def radius(self, x):
@@ -140,6 +142,7 @@ class CableParameters:
     b: Quantity | None = None
 
     I_e: Quantity | None = None
+    I_i: Quantity | None = field(default_factory=lambda: 30 * pampere)
 
     # simulation parameters
     t: Quantity | None = None
@@ -160,6 +163,7 @@ class CableParameters:
             f"  r0  = {self.r0}\n"
             f"  b   = {self.b}\n"
             f"  I_e = {self.I_e}\n"
+            f"  I_i = {self.I_i}\n"
             f"  t   = {self.t}\n"
             f"  dt  = {self.dt}\n"
         )
@@ -251,7 +255,8 @@ class CableParameters:
             t=to_SI(self.t, second),
             dt=to_SI(self.dt, second),
 
-            I_e=to_SI(self.I_e, ampere)
+            I_e=to_SI(self.I_e, ampere),
+            I_i=to_SI(self.I_i, ampere)
         )
 
     @classmethod
@@ -277,6 +282,7 @@ class CableParameters:
             dt=other.dt,
 
             I_e=other.I_e,
+            I_i=getattr(other, "I_i", to_SI(30 * pampere)),
         )
 
     @classmethod
@@ -300,6 +306,7 @@ class CableParameters:
             b=None,  # m^2/s
 
             I_e=None,  # A
+            I_i=to_SI(30 * pampere),  # A
             t=None,  # s
             dt=None  # s
     ):
@@ -319,6 +326,7 @@ class CableParameters:
         b = None if b is None else b * meter ** 2 / second
 
         I_e = None if I_e is None else I_e * ampere
+        I_i = 30 * pampere if I_i is None else I_i * ampere
 
         # Derived quantities
         if gL is None and rm is not None:
@@ -352,6 +360,7 @@ class CableParameters:
             b=b,
 
             I_e=I_e,
+            I_i=I_i,
             t=t,
             dt=dt
         )
@@ -402,6 +411,9 @@ class CableParameters:
                 converted[key] = value * meter ** 2 / second
 
             elif key == "I_e":
+                converted[key] = value * ampere
+
+            elif key == "I_i":
                 converted[key] = value * ampere
 
             elif key == "N":

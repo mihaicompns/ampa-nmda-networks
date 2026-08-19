@@ -10,35 +10,38 @@ Requirements:
 6. Maintain centralized statistics across simulations
 """
 
-import unittest
-import numpy as np
-import os
 import json
-from pathlib import Path
-from typing import Dict, Any, Tuple, List
-
-from brian2 import ms, um, Hz
-from scipy.stats import expon, uniform
-
+import os
 # Import the modules we'll be working with
 import sys
-import os
+import unittest
+from pathlib import Path
+
+import numpy as np
+from brian2 import ms, um, Hz
+from brian2.units.allunits import pampere
+from scipy.stats import expon, uniform
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 
 from TaperredDendritesPDE import (
-    ConicalNumericalCableParameters,
     default_params,
     to_SI,
-    create_delta_pulses,
-    simulate_crank_nicolson_unitless_closed_tapered_cylinder_with_param
-)
-from TaperredDendritesBalancedInputPDE import (
-    save_balanced_simulation_reference,
-    load_balanced_simulation_reference,
-    compute_simulation_hash
+    create_delta_pulses
 )
 from TaperredDendritesBalancedCrankNicolson import (
-    simulate_crank_nicolson_unitless_closed_tapered_cylinder_balance_with_param
+    simulate_crank_nicolson_unitless_closed_tapered_cone_balance_with_param
+)
+from CylindricalDendritesEventSimulation import (
+    simulate_crank_nicolson_unitless_closed_cylinder_balance_with_param,
+)
+from ImprovedSimulationSave import (
+    run_and_save_balanced_conical_simulation,
+    run_and_save_balanced_cylindrical_simulation,
+    run_and_save_balanced_conical_with_cylindrical_comparison,
+    sim_conical,
+    sim_cylindrical,
+    submit_balanced_conical_with_cylindrical_comparison,
 )
 
 
@@ -99,135 +102,86 @@ class TestImprovedSimulationSave(unittest.TestCase):
         self.assertTrue(np.all(spike_train1[1] <= b))  # Positions within bounds
     
     def test_save_comprehensive_simulation_data(self):
-        """Test saving both inputs and outputs with comprehensive metadata."""
+        """Test that the production save workflow creates the expected artifacts."""
         # Static, hardcoded excitatory/inhibitory spike trains - shape (2, n_events):
         # row 0 = times [s], row 1 = positions [m], matching create_delta_pulses' format.
         x_N = 51
         L = to_SI(100 * um)
-        t_max = to_SI(20 * ms)
+        t_max = to_SI(1 * ms)
         dt_ = to_SI(0.01 * ms)
 
         excitatory_events = np.array([
-            [to_SI(5 * ms), to_SI(15 * ms)],
+            [to_SI(0.2 * ms), to_SI(0.7 * ms)],
             [to_SI(20 * um), to_SI(50 * um)],
         ])
         inhibitory_events = np.array([
-            [to_SI(8 * ms), to_SI(18 * ms)],
+            [to_SI(0.4 * ms), to_SI(0.8 * ms)],
             [to_SI(30 * um), to_SI(60 * um)],
         ])
 
         p = default_params.with_SI_properties(t=t_max, N=x_N, dt=dt_, L=L).to_numerical()
 
-        # Run the real balanced Crank-Nicolson simulation
-        times, V_s = simulate_crank_nicolson_unitless_closed_tapered_cylinder_balance_with_param(
+        result = run_and_save_balanced_conical_simulation(
             p=p,
+            t_max=t_max,
+            output_root=self.test_dir,
+            simulation_label="test_comprehensive_save",
             excitatory_events=excitatory_events,
             inhibitory_events=inhibitory_events,
-            t_max=t_max,
             saved_frames=50,
             verbose=False,
-            plot=False,
-            save=False,
-            simulation_label="test_comprehensive_save"
+            show_plot=False,
         )
 
-        n_excitatory = excitatory_events.shape[1]
-        n_inhibitory = inhibitory_events.shape[1]
+        # Verify the production workflow created the expected directory structure.
+        self.assertTrue((result.save_dir / "inputs").is_dir())
+        self.assertTrue((result.save_dir / "outputs").is_dir())
+        self.assertTrue((result.save_dir / "graphs").is_dir())
+        self.assertTrue((result.save_dir / "metadata").is_dir())
+        self.assertTrue((result.save_dir / "statistics").is_dir())
 
-        # Create comprehensive metadata
-        metadata = {
-            # Simulation parameters
-            "simulation_info": {
-                "label": "test_comprehensive_save",
-                "timestamp": "2026-08-18T18:35:00Z",  # Would be real timestamp
-                "deterministic": True,
-            },
-
-            # Geometry information
-            "geometry": {
-                "cable_length_um": 100.0,
-                "spatial_points": x_N,
-                "spatial_range_um": [0.0, 100.0],
-                "dx_um": 100.0 / (x_N - 1)
-            },
-
-            # Electrical properties
-            "electrical_properties": {
-                "tau_ms": float(p.tau * 1000),
-                "dt_ms": 0.01,
-                "t_max_ms": 20.0,
-                "I_e_nA": float(p.I_e * 1e9)
-            },
-
-            # Input information
-            "input_info": {
-                "total_events": n_excitatory + n_inhibitory,
-                "excitatory_events": n_excitatory,
-                "inhibitory_events": n_inhibitory,
-            },
-
-            # Output statistics
-            "output_statistics": {
-                "voltage_min_mV": float(np.min(V_s) * 1000),
-                "voltage_max_mV": float(np.max(V_s) * 1000),
-                "voltage_mean_mV": float(np.mean(V_s) * 1000),
-                "voltage_std_mV": float(np.std(V_s) * 1000),
-                "voltage_range_mV": float((np.max(V_s) - np.min(V_s)) * 1000),
-                "max_depolarization_location_um": float(np.argmax(np.max(V_s, axis=1)) * (100.0 / (x_N - 1))),
-                "max_depolarization_time_ms": float(times[np.argmax(np.max(V_s, axis=1))] * 1000)
-            }
-        }
-
-        # Save everything in an organized format
-        save_dir = self.test_dir / "test_comprehensive_save"
-        save_dir.mkdir(exist_ok=True)
-
-        # Save inputs (spike trains)
-        inputs_file = save_dir / "inputs.npz"
-        np.savez(inputs_file,
-                 excitatory_events=excitatory_events,
-                 inhibitory_events=inhibitory_events)
-
-        # Save outputs (voltage course)
-        outputs_file = save_dir / "outputs.npz"
-        np.savez(outputs_file,
-                 times=times,
-                 voltage=V_s,
-                 spatial_points=len(p.x))
-
-        # Save metadata
-        metadata_file = save_dir / "metadata.json"
-        with open(metadata_file, 'w') as f:
-            json.dump(metadata, f, indent=2)
-
-        # Verify all files were created
-        self.assertTrue(inputs_file.exists())
-        self.assertTrue(outputs_file.exists())
-        self.assertTrue(metadata_file.exists())
+        self.assertTrue(result.inputs_file.exists())
+        self.assertTrue(result.outputs_file.exists())
+        self.assertTrue(result.metadata_file.exists())
+        self.assertTrue(result.statistics_file.exists())
+        self.assertTrue(result.graph_file.exists())
 
         # Verify data integrity
-        loaded_inputs = np.load(inputs_file)
-        loaded_outputs = np.load(outputs_file)
+        loaded_inputs = np.load(result.inputs_file)
+        loaded_outputs = np.load(result.outputs_file)
 
-        with open(metadata_file, 'r') as f:
+        with open(result.metadata_file, 'r') as f:
             loaded_metadata = json.load(f)
+        with open(result.statistics_file, 'r') as f:
+            loaded_statistics = json.load(f)
 
         # Check inputs
         np.testing.assert_array_equal(loaded_inputs['excitatory_events'], excitatory_events)
         np.testing.assert_array_equal(loaded_inputs['inhibitory_events'], inhibitory_events)
 
         # Check outputs
-        np.testing.assert_array_equal(loaded_outputs['times'], times)
-        np.testing.assert_array_equal(loaded_outputs['voltage'], V_s)
+        np.testing.assert_array_equal(loaded_outputs['times'], result.times)
+        np.testing.assert_array_equal(loaded_outputs['voltage'], result.V_s)
 
         # Check metadata
         self.assertEqual(loaded_metadata['simulation_info']['label'], "test_comprehensive_save")
         self.assertEqual(loaded_metadata['geometry']['cable_length_um'], 100.0)
+        self.assertAlmostEqual(loaded_metadata['electrical_properties']['I_i_pA'], 30.0)
         self.assertEqual(loaded_metadata['input_info']['total_events'], 4)
+        self.assertEqual(loaded_metadata['files']['graph'], 'graphs/simulation_graph.png')
+        np.testing.assert_array_equal(
+            np.array(loaded_metadata['input_info']['excitatory_spike_train']),
+            excitatory_events,
+        )
+        np.testing.assert_array_equal(
+            np.array(loaded_metadata['input_info']['inhibitory_spike_train']),
+            inhibitory_events,
+        )
 
-        # Clean up
-        import shutil
-        shutil.rmtree(save_dir)
+        # Check statistics
+        self.assertEqual(loaded_statistics['total_events'], 4)
+        self.assertIn('voltage_max_mV', loaded_statistics)
+        self.assertIn('voltage_min_mV', loaded_statistics)
     
     def test_create_simulation_summary_statistics(self):
         """Test creating centralized statistics across multiple simulations."""
@@ -236,6 +190,8 @@ class TestImprovedSimulationSave(unittest.TestCase):
         t_max = to_SI(15 * ms)
         dt_ = to_SI(0.01 * ms)
         p = default_params.with_SI_properties(t=t_max, N=x_N, dt=dt_, L=L).to_numerical()
+        self.assertAlmostEqual(p.I_i, to_SI(30 * pampere))
+        self.assertAlmostEqual(p.to_numerical_cylindrical_params().I_i, p.I_i)
 
         # Run a few simulations, each with a static, hardcoded pair of spike trains
         simulations = []
@@ -250,16 +206,13 @@ class TestImprovedSimulationSave(unittest.TestCase):
                 [to_SI((30 + i * 10) * um)],
             ])
 
-            times, V_s = simulate_crank_nicolson_unitless_closed_tapered_cylinder_balance_with_param(
+            times, V_s = simulate_crank_nicolson_unitless_closed_tapered_cone_balance_with_param(
                 p=p,
                 excitatory_events=excitatory_events,
                 inhibitory_events=inhibitory_events,
                 t_max=t_max,
                 saved_frames=30,
                 verbose=False,
-                plot=False,
-                save=False,
-                simulation_label=f"test_sim_{i}"
             )
 
             # Collect simulation metadata
@@ -334,28 +287,22 @@ class TestImprovedSimulationSave(unittest.TestCase):
         np.testing.assert_array_equal(inhibitory_events1, inhibitory_events2)
 
         # Run simulations with identical parameters
-        times1, V_s1 = simulate_crank_nicolson_unitless_closed_tapered_cylinder_balance_with_param(
+        times1, V_s1 = simulate_crank_nicolson_unitless_closed_tapered_cone_balance_with_param(
             p=p,
             excitatory_events=excitatory_events1,
             inhibitory_events=inhibitory_events1,
             t_max=t_max,
             saved_frames=30,
             verbose=False,
-            plot=False,
-            save=False,
-            simulation_label="det_test_1"
         )
 
-        times2, V_s2 = simulate_crank_nicolson_unitless_closed_tapered_cylinder_balance_with_param(
+        times2, V_s2 = simulate_crank_nicolson_unitless_closed_tapered_cone_balance_with_param(
             p=p,
             excitatory_events=excitatory_events2,
             inhibitory_events=inhibitory_events2,
             t_max=t_max,
             saved_frames=30,
             verbose=False,
-            plot=False,
-            save=False,
-            simulation_label="det_test_2"
         )
 
         # Should be 100% identical
@@ -367,41 +314,42 @@ class TestImprovedSimulationSave(unittest.TestCase):
         self.assertFalse(np.any(np.isnan(V_s1)))
         self.assertFalse(np.any(np.isinf(V_s1)))
     
-    @unittest.skip(
-        "No real balanced cylindrical solver exists yet - CylindricalDendritesEventSimulation.py "
-        "only supports a single homogeneous event stream, not separate excitatory/inhibitory "
-        "streams. Re-enable once a balanced cylindrical counterpart is built (see "
-        "TaperredDendritesBalancedCrankNicolson.py for the tapered version to mirror)."
-    )
     def test_comparison_ready_format_tapered_vs_cylinder(self):
         """Test creating format suitable for comparing tapered vs cylinder."""
-        # This test defines what we want for the comparison feature
-
         x_N = 31
         L = to_SI(100 * um)
-        t_max = to_SI(15 * ms)
+        t_max = to_SI(1 * ms)
         dt_ = to_SI(0.01 * ms)
         p = default_params.with_SI_properties(t=t_max, N=x_N, dt=dt_, L=L).to_numerical()
+        cylindrical_p = p.to_numerical_cylindrical_params()
 
         # Same static events used for both geometries, for a fair comparison
-        excitatory_events = np.array([[to_SI(5 * ms), to_SI(10 * ms)], [to_SI(20 * um), to_SI(40 * um)]])
-        inhibitory_events = np.array([[to_SI(7 * ms), to_SI(12 * ms)], [to_SI(30 * um), to_SI(50 * um)]])
+        excitatory_events = np.array([
+            [to_SI(0.2 * ms), to_SI(0.7 * ms)],
+            [to_SI(20 * um), to_SI(40 * um)],
+        ])
+        inhibitory_events = np.array([
+            [to_SI(0.4 * ms), to_SI(0.8 * ms)],
+            [to_SI(30 * um), to_SI(50 * um)],
+        ])
 
-        tapered_times, tapered_V_s = simulate_crank_nicolson_unitless_closed_tapered_cylinder_balance_with_param(
+        tapered_times, tapered_V_s = simulate_crank_nicolson_unitless_closed_tapered_cone_balance_with_param(
             p=p,
             excitatory_events=excitatory_events,
             inhibitory_events=inhibitory_events,
             t_max=t_max,
             saved_frames=30,
             verbose=False,
-            plot=False,
-            save=False,
-            simulation_label="tapered_comparison"
         )
 
-        # TODO: run the same static events through a real balanced cylindrical solver
-        # once one exists, instead of reusing the tapered output here.
-        cylinder_times, cylinder_V_s = tapered_times, tapered_V_s
+        cylinder_times, cylinder_V_s = simulate_crank_nicolson_unitless_closed_cylinder_balance_with_param(
+            p=cylindrical_p,
+            excitatory_events=excitatory_events,
+            inhibitory_events=inhibitory_events,
+            t_max=t_max,
+            saved_frames=30,
+            verbose=False,
+        )
         
         # Create comparison metadata
         comparison_data = {
@@ -452,6 +400,8 @@ class TestImprovedSimulationSave(unittest.TestCase):
         self.assertIn("tapered_dendrite", loaded_data)
         self.assertIn("cylinder", loaded_data)
         self.assertIn("difference_analysis", loaded_data)
+        np.testing.assert_array_equal(tapered_times, cylinder_times)
+        self.assertEqual(tapered_V_s.shape, cylinder_V_s.shape)
         
         # Clean up
         if comparison_file.exists():
@@ -459,123 +409,344 @@ class TestImprovedSimulationSave(unittest.TestCase):
     
     def test_end_to_end_improved_simulation_workflow(self):
         """End-to-end test of the improved simulation workflow."""
-        # This test represents the complete workflow we want to achieve
-
         x_N = 41
         L = to_SI(200 * um)
-        t_max = to_SI(25 * ms)
+        t_max = to_SI(1 * ms)
         dt_ = to_SI(0.005 * ms)
         p = default_params.with_SI_properties(t=t_max, N=x_N, dt=dt_, L=L).to_numerical()
 
         # 1. Static, hardcoded deterministic inputs (spike trains)
         excitatory_events = np.array([
-            [to_SI(5 * ms), to_SI(10 * ms), to_SI(15 * ms), to_SI(20 * ms)],
+            [to_SI(0.2 * ms), to_SI(0.4 * ms), to_SI(0.6 * ms), to_SI(0.8 * ms)],
             [to_SI(50 * um), to_SI(100 * um), to_SI(150 * um), to_SI(180 * um)],
         ])
         inhibitory_events = np.array([
-            [to_SI(7 * ms), to_SI(12 * ms), to_SI(17 * ms), to_SI(22 * ms)],
+            [to_SI(0.3 * ms), to_SI(0.5 * ms), to_SI(0.7 * ms), to_SI(0.9 * ms)],
             [to_SI(75 * um), to_SI(125 * um), to_SI(175 * um), to_SI(190 * um)],
         ])
 
-        # 2. Run deterministic simulation
-        times, V_s = simulate_crank_nicolson_unitless_closed_tapered_cylinder_balance_with_param(
+        result = run_and_save_balanced_conical_simulation(
+            p=p,
+            t_max=t_max,
+            output_root=self.test_dir,
+            simulation_label="end_to_end_test",
+            excitatory_events=excitatory_events,
+            inhibitory_events=inhibitory_events,
+            saved_frames=500,
+            verbose=False,
+            show_plot=False,
+        )
+
+        # 2. Verify determinism by running again with the same static events
+        times2, V_s2 = simulate_crank_nicolson_unitless_closed_tapered_cone_balance_with_param(
             p=p,
             excitatory_events=excitatory_events,
             inhibitory_events=inhibitory_events,
             t_max=t_max,
             saved_frames=500,
             verbose=False,
-            plot=False,
-            save=False,
-            simulation_label="end_to_end_test"
         )
 
-        # 3. Save comprehensive data
-        save_dir = self.test_dir / "end_to_end_test"
-        save_dir.mkdir(exist_ok=True)
+        np.testing.assert_array_equal(result.times, times2)
+        np.testing.assert_array_equal(result.V_s, V_s2)
 
-        # Save inputs
-        inputs_file = save_dir / "inputs.npz"
-        np.savez(inputs_file,
-                 excitatory_events=excitatory_events,
-                 inhibitory_events=inhibitory_events)
-
-        # Save outputs
-        outputs_file = save_dir / "outputs.npz"
-        np.savez(outputs_file,
-                 times=times,
-                 voltage=V_s,
-                 simulation_parameters={
-                     "x_N": x_N,
-                     "dt_ms": 0.005,
-                     "t_max_ms": 25.0,
-                     "L_um": 200.0
-                 })
-
-        # 4. Save metadata
-        metadata = {
-            "simulation_info": {
-                "label": "end_to_end_test",
-                "deterministic": True,
-            },
-            "inputs_summary": {
-                "total_events": excitatory_events.shape[1] + inhibitory_events.shape[1],
-                "excitatory_events": excitatory_events.shape[1],
-                "inhibitory_events": inhibitory_events.shape[1],
-            },
-            "outputs_summary": {
-                "max_voltage_mV": float(np.max(V_s) * 1000),
-                "min_voltage_mV": float(np.min(V_s) * 1000),
-                "voltage_range_mV": float((np.max(V_s) - np.min(V_s)) * 1000)
-            }
-        }
-
-        metadata_file = save_dir / "metadata.json"
-        with open(metadata_file, 'w') as f:
-            json.dump(metadata, f, indent=2)
-
-        # 5. Verify determinism by running again with the same static events
-        times2, V_s2 = simulate_crank_nicolson_unitless_closed_tapered_cylinder_balance_with_param(
-            p=p,
-            excitatory_events=excitatory_events,
-            inhibitory_events=inhibitory_events,
-            t_max=t_max,
-            saved_frames=500,
-            verbose=False,
-            plot=False,
-            save=False,
-            simulation_label="end_to_end_test"
-        )
-
-        # 6. Verify everything matches
-        np.testing.assert_array_equal(times, times2)
-        np.testing.assert_array_equal(V_s, V_s2)
-
-        # 7. Verify all files exist and contain correct data
-        self.assertTrue(inputs_file.exists())
-        self.assertTrue(outputs_file.exists())
-        self.assertTrue(metadata_file.exists())
+        # 3. Verify all files exist and contain correct data
+        self.assertTrue(result.inputs_file.exists())
+        self.assertTrue(result.outputs_file.exists())
+        self.assertTrue(result.metadata_file.exists())
+        self.assertTrue(result.statistics_file.exists())
+        self.assertTrue(result.graph_file.exists())
 
         # Check inputs
-        loaded_inputs = np.load(inputs_file)
+        loaded_inputs = np.load(result.inputs_file)
         np.testing.assert_array_equal(loaded_inputs['excitatory_events'], excitatory_events)
         np.testing.assert_array_equal(loaded_inputs['inhibitory_events'], inhibitory_events)
 
         # Check outputs
-        loaded_outputs = np.load(outputs_file)
-        np.testing.assert_array_equal(loaded_outputs['times'], times)
-        np.testing.assert_array_equal(loaded_outputs['voltage'], V_s)
+        loaded_outputs = np.load(result.outputs_file)
+        np.testing.assert_array_equal(loaded_outputs['times'], result.times)
+        np.testing.assert_array_equal(loaded_outputs['voltage'], result.V_s)
 
         # Check metadata
-        with open(metadata_file, 'r') as f:
+        with open(result.metadata_file, 'r') as f:
             loaded_metadata = json.load(f)
 
         self.assertEqual(loaded_metadata['simulation_info']['label'], "end_to_end_test")
         self.assertTrue(loaded_metadata['simulation_info']['deterministic'])
+        self.assertEqual(loaded_metadata['input_info']['total_events'], 8)
 
-        # Clean up
-        import shutil
-        shutil.rmtree(save_dir)
+    def test_save_conical_and_cylindrical_comparison_with_static_events(self):
+        """Test saving cone and cylinder simulations as sibling comparison outputs."""
+        x_N = 31
+        L = to_SI(100 * um)
+        t_max = to_SI(1 * ms)
+        dt_ = to_SI(0.01 * ms)
+        p = default_params.with_SI_properties(t=t_max, N=x_N, dt=dt_, L=L).to_numerical()
+
+        excitatory_events = np.array([
+            [to_SI(0.2 * ms), to_SI(0.7 * ms)],
+            [to_SI(20 * um), to_SI(50 * um)],
+        ])
+        inhibitory_events = np.array([
+            [to_SI(0.4 * ms), to_SI(0.8 * ms)],
+            [to_SI(30 * um), to_SI(60 * um)],
+        ])
+
+        comparison = run_and_save_balanced_conical_with_cylindrical_comparison(
+            conical_p=p,
+            t_max=t_max,
+            output_root=self.test_dir,
+            simulation_label="short_static_comparison",
+            excitatory_events=excitatory_events,
+            inhibitory_events=inhibitory_events,
+            saved_frames=50,
+            verbose=False,
+            plot=True,
+            show_plot=False,
+        )
+
+        self.assertTrue((comparison["save_dir"] / "conical").is_dir())
+        self.assertTrue((comparison["save_dir"] / "cylindrical").is_dir())
+
+        conical = comparison["conical"]
+        cylindrical = comparison["cylindrical"]
+
+        self.assertTrue(conical.inputs_file.exists())
+        self.assertTrue(conical.outputs_file.exists())
+        self.assertTrue(conical.metadata_file.exists())
+        self.assertTrue(conical.statistics_file.exists())
+        self.assertTrue(conical.graph_file.exists())
+
+        self.assertTrue(cylindrical.inputs_file.exists())
+        self.assertTrue(cylindrical.outputs_file.exists())
+        self.assertTrue(cylindrical.metadata_file.exists())
+        self.assertTrue(cylindrical.statistics_file.exists())
+        self.assertTrue(cylindrical.graph_file.exists())
+
+        conical_inputs = np.load(conical.inputs_file)
+        cylindrical_inputs = np.load(cylindrical.inputs_file)
+        np.testing.assert_array_equal(conical_inputs["excitatory_events"], excitatory_events)
+        np.testing.assert_array_equal(conical_inputs["inhibitory_events"], inhibitory_events)
+        np.testing.assert_array_equal(cylindrical_inputs["excitatory_events"], excitatory_events)
+        np.testing.assert_array_equal(cylindrical_inputs["inhibitory_events"], inhibitory_events)
+
+        with open(conical.metadata_file, "r") as f:
+            conical_metadata = json.load(f)
+        with open(cylindrical.metadata_file, "r") as f:
+            cylindrical_metadata = json.load(f)
+
+        self.assertEqual(conical_metadata["simulation_info"]["geometry_type"], "tapered_cone")
+        self.assertEqual(cylindrical_metadata["simulation_info"]["geometry_type"], "uniform_cylinder")
+        self.assertAlmostEqual(conical_metadata["electrical_properties"]["I_i_pA"], 30.0)
+        self.assertAlmostEqual(cylindrical_metadata["electrical_properties"]["I_i_pA"], 30.0)
+        self.assertEqual(conical_metadata["input_info"]["total_events"], 4)
+        self.assertEqual(cylindrical_metadata["input_info"]["total_events"], 4)
+
+    def test_save_direct_cylindrical_simulation_with_static_events(self):
+        """Test that the direct cylindrical save workflow creates expected artifacts."""
+        x_N = 31
+        L = to_SI(100 * um)
+        t_max = to_SI(1 * ms)
+        dt_ = to_SI(0.01 * ms)
+        conical_p = default_params.with_SI_properties(t=t_max, N=x_N, dt=dt_, L=L).to_numerical()
+        p = conical_p.to_numerical_cylindrical_params()
+
+        excitatory_events = np.array([
+            [to_SI(0.2 * ms), to_SI(0.7 * ms)],
+            [to_SI(20 * um), to_SI(50 * um)],
+        ])
+        inhibitory_events = np.array([
+            [to_SI(0.4 * ms), to_SI(0.8 * ms)],
+            [to_SI(30 * um), to_SI(60 * um)],
+        ])
+
+        result = run_and_save_balanced_cylindrical_simulation(
+            p=p,
+            t_max=t_max,
+            output_root=self.test_dir,
+            simulation_label="direct_cylindrical_save",
+            excitatory_events=excitatory_events,
+            inhibitory_events=inhibitory_events,
+            saved_frames=50,
+            verbose=False,
+            plot=True,
+            show_plot=False,
+        )
+
+        self.assertTrue((result.save_dir / "inputs").is_dir())
+        self.assertTrue((result.save_dir / "outputs").is_dir())
+        self.assertTrue((result.save_dir / "graphs").is_dir())
+        self.assertTrue((result.save_dir / "metadata").is_dir())
+        self.assertTrue((result.save_dir / "statistics").is_dir())
+
+        self.assertTrue(result.inputs_file.exists())
+        self.assertTrue(result.outputs_file.exists())
+        self.assertTrue(result.metadata_file.exists())
+        self.assertTrue(result.statistics_file.exists())
+        self.assertTrue(result.graph_file.exists())
+
+        loaded_inputs = np.load(result.inputs_file)
+        loaded_outputs = np.load(result.outputs_file)
+        np.testing.assert_array_equal(loaded_inputs["excitatory_events"], excitatory_events)
+        np.testing.assert_array_equal(loaded_inputs["inhibitory_events"], inhibitory_events)
+        np.testing.assert_array_equal(loaded_outputs["times"], result.times)
+        np.testing.assert_array_equal(loaded_outputs["voltage"], result.V_s)
+
+        with open(result.metadata_file, "r") as f:
+            loaded_metadata = json.load(f)
+
+        self.assertEqual(loaded_metadata["simulation_info"]["label"], "direct_cylindrical_save")
+        self.assertEqual(loaded_metadata["simulation_info"]["geometry_type"], "uniform_cylinder")
+        self.assertEqual(loaded_metadata["simulation_info"]["simulator"],
+                         "simulate_crank_nicolson_unitless_closed_cylinder_balance_with_param")
+        self.assertEqual(loaded_metadata["input_info"]["total_events"], 4)
+        self.assertAlmostEqual(loaded_metadata["electrical_properties"]["I_i_pA"], 30.0)
+
+    def test_sim_conical_command_with_static_events(self):
+        """Test the command-style conical simulation plus save wrapper."""
+        x_N = 31
+        L = to_SI(100 * um)
+        t_max = to_SI(1 * ms)
+        dt_ = to_SI(0.01 * ms)
+        p = default_params.with_SI_properties(t=t_max, N=x_N, dt=dt_, L=L).to_numerical()
+
+        excitatory_events = np.array([
+            [to_SI(0.2 * ms), to_SI(0.7 * ms)],
+            [to_SI(20 * um), to_SI(50 * um)],
+        ])
+        inhibitory_events = np.array([
+            [to_SI(0.4 * ms), to_SI(0.8 * ms)],
+            [to_SI(30 * um), to_SI(60 * um)],
+        ])
+
+        result = sim_conical(
+            p=p,
+            t_max=t_max,
+            output_root=self.test_dir,
+            simulation_label="sim_conical_command",
+            excitatory_events=excitatory_events,
+            inhibitory_events=inhibitory_events,
+            saved_frames=50,
+            verbose=False,
+            plot=True,
+            show_plot=False,
+        )
+
+        self.assertTrue(result.inputs_file.exists())
+        self.assertTrue(result.outputs_file.exists())
+        self.assertTrue(result.metadata_file.exists())
+        self.assertTrue(result.statistics_file.exists())
+        self.assertTrue(result.graph_file.exists())
+
+        loaded_inputs = np.load(result.inputs_file)
+        np.testing.assert_array_equal(loaded_inputs["excitatory_events"], excitatory_events)
+        np.testing.assert_array_equal(loaded_inputs["inhibitory_events"], inhibitory_events)
+
+        with open(result.metadata_file, "r") as f:
+            loaded_metadata = json.load(f)
+
+        self.assertEqual(loaded_metadata["simulation_info"]["label"], "sim_conical_command")
+        self.assertEqual(loaded_metadata["simulation_info"]["geometry_type"], "tapered_cone")
+
+    def test_sim_cylindrical_command_with_static_events(self):
+        """Test the command-style cylindrical simulation plus save wrapper."""
+        x_N = 31
+        L = to_SI(100 * um)
+        t_max = to_SI(1 * ms)
+        dt_ = to_SI(0.01 * ms)
+        conical_p = default_params.with_SI_properties(t=t_max, N=x_N, dt=dt_, L=L).to_numerical()
+        p = conical_p.to_numerical_cylindrical_params()
+
+        excitatory_events = np.array([
+            [to_SI(0.2 * ms), to_SI(0.7 * ms)],
+            [to_SI(20 * um), to_SI(50 * um)],
+        ])
+        inhibitory_events = np.array([
+            [to_SI(0.4 * ms), to_SI(0.8 * ms)],
+            [to_SI(30 * um), to_SI(60 * um)],
+        ])
+
+        result = sim_cylindrical(
+            p=p,
+            t_max=t_max,
+            output_root=self.test_dir,
+            simulation_label="sim_cylindrical_command",
+            excitatory_events=excitatory_events,
+            inhibitory_events=inhibitory_events,
+            saved_frames=50,
+            verbose=False,
+            plot=True,
+            show_plot=False,
+        )
+
+        self.assertTrue(result.inputs_file.exists())
+        self.assertTrue(result.outputs_file.exists())
+        self.assertTrue(result.metadata_file.exists())
+        self.assertTrue(result.statistics_file.exists())
+        self.assertTrue(result.graph_file.exists())
+
+        loaded_inputs = np.load(result.inputs_file)
+        np.testing.assert_array_equal(loaded_inputs["excitatory_events"], excitatory_events)
+        np.testing.assert_array_equal(loaded_inputs["inhibitory_events"], inhibitory_events)
+
+        with open(result.metadata_file, "r") as f:
+            loaded_metadata = json.load(f)
+
+        self.assertEqual(loaded_metadata["simulation_info"]["label"], "sim_cylindrical_command")
+        self.assertEqual(loaded_metadata["simulation_info"]["geometry_type"], "uniform_cylinder")
+
+    def test_submit_balanced_conical_with_cylindrical_comparison_runs_parallel_commands(self):
+        """Test the non-blocking comparison submitter starts cone and cylinder save tasks."""
+        x_N = 31
+        L = to_SI(100 * um)
+        t_max = to_SI(1 * ms)
+        dt_ = to_SI(0.01 * ms)
+        p = default_params.with_SI_properties(t=t_max, N=x_N, dt=dt_, L=L).to_numerical()
+
+        excitatory_events = np.array([
+            [to_SI(0.2 * ms), to_SI(0.7 * ms)],
+            [to_SI(20 * um), to_SI(50 * um)],
+        ])
+        inhibitory_events = np.array([
+            [to_SI(0.4 * ms), to_SI(0.8 * ms)],
+            [to_SI(30 * um), to_SI(60 * um)],
+        ])
+
+        submitted = submit_balanced_conical_with_cylindrical_comparison(
+            conical_p=p,
+            t_max=t_max,
+            output_root=self.test_dir,
+            simulation_label="submitted_static_comparison",
+            excitatory_events=excitatory_events,
+            inhibitory_events=inhibitory_events,
+            saved_frames=50,
+            verbose=False,
+            plot=True,
+            show_plot=False,
+            max_workers=2,
+        )
+
+        self.assertEqual(submitted.save_dir, self.test_dir / "submitted_static_comparison")
+        self.assertEqual(set(submitted.futures.values()), {"conical", "cylindrical"})
+
+        comparison = submitted.result()
+
+        self.assertTrue((comparison["save_dir"] / "conical").is_dir())
+        self.assertTrue((comparison["save_dir"] / "cylindrical").is_dir())
+
+        conical = comparison["conical"]
+        cylindrical = comparison["cylindrical"]
+        self.assertTrue(conical.inputs_file.exists())
+        self.assertTrue(cylindrical.inputs_file.exists())
+        self.assertTrue(conical.graph_file.exists())
+        self.assertTrue(cylindrical.graph_file.exists())
+
+        conical_inputs = np.load(conical.inputs_file)
+        cylindrical_inputs = np.load(cylindrical.inputs_file)
+        np.testing.assert_array_equal(conical_inputs["excitatory_events"], excitatory_events)
+        np.testing.assert_array_equal(conical_inputs["inhibitory_events"], inhibitory_events)
+        np.testing.assert_array_equal(cylindrical_inputs["excitatory_events"], excitatory_events)
+        np.testing.assert_array_equal(cylindrical_inputs["inhibitory_events"], inhibitory_events)
 
 
 if __name__ == '__main__':
