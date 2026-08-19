@@ -1,0 +1,228 @@
+"""
+Real Crank-Nicolson balanced excitatory/inhibitory input simulation for the tapered
+dendrite: two separate event streams (excitatory_events, inhibitory_events), each
+generated with create_delta_pulses, run through the same tapered-cable Crank-Nicolson
+machinery used by simulate_crank_nicolson_unitless_closed_tapered_cylinder_with_param.
+
+Kept as new functions in a new file rather than modifying TaperredDendritesPDE.py's
+existing crank_nicolson()/synaptic_spike_train_input(): those only support a single
+homogeneous event stream injected at one fixed amplitude (p.I_e), with no sign. Balanced
+input needs excitatory events injected as +p.I_e and inhibitory events as -p.I_e, which
+needs its own stepping function rather than a change to the existing one.
+
+Assumption made explicit: inhibitory events use the same magnitude p.I_e as excitatory
+events, just with a flipped sign - there is no separate inhibitory current amplitude
+field on ConicalNumericalCableParameters. Revisit if a different E/I magnitude is needed.
+"""
+
+import numpy as np
+from brian2 import second, Hz, um, meter, have_same_dimensions
+from scipy.stats import expon, uniform
+from scipy.sparse import diags, eye
+from scipy.sparse.linalg import factorized
+
+from conical_data import ConicalNumericalCableParameters, create_delta_pulses
+from data import to_SI
+from CylindricalDendritesPDE import dirac_delta_unitless
+from TaperredDendritesPDE import save_simulation, plot_difussion_unitless_spike_train
+
+
+def experiment_label_for_uniform_balance(e_limits, i_limits):
+    e_left, e_right = e_limits
+    i_left, i_right = i_limits
+    return (
+        f"Balanced E~[{int(e_left / 1e-6)} um - {int(e_right / 1e-6)} um] "
+        f"I~[{int(i_left / 1e-6)} um - {int(i_right / 1e-6)} um]"
+    )
+
+
+def _consume_event_stream(t, dt, events, next_idx, p, sign):
+    """
+    Consume all events in `events` that occur in [t, t+dt), returning their
+    combined contribution (with the given sign) and the updated next_idx.
+    """
+    contribution = np.zeros_like(p.x)
+
+    if events.size == 0 or next_idx >= events.shape[1]:
+        return contribution, next_idx
+
+    event_times, event_positions = events
+    n_events = len(event_times)
+    t_end = t + dt
+
+    while next_idx < n_events:
+        spike_t = event_times[next_idx]
+
+        if spike_t >= t_end:
+            break
+
+        if spike_t < t:
+            raise ValueError(
+                f"Spike at t={spike_t} is before current time t={t}. next_idx={next_idx}."
+            )
+
+        spike_x = event_positions[next_idx]
+
+        contribution += sign * dirac_delta_unitless(
+            x0=spike_x,
+            t0=spike_t,
+            I_e=p.I_e,
+            x=p.x,
+            t=t,
+            dx=p.dx,
+            dt=dt,
+            tau_m=p.tau,
+            r_of_x=p.radius(spike_x),
+        )
+
+        next_idx += 1
+
+    return contribution, next_idx
+
+
+def synaptic_spike_train_input_balanced(t, dt, excitatory_events, inhibitory_events,
+                                         next_exc_idx, next_inh_idx, p: ConicalNumericalCableParameters):
+    """
+    Merge two separate event streams: excitatory events inject +p.I_e, inhibitory
+    events inject -p.I_e.
+    """
+    exc_contribution, next_exc_idx = _consume_event_stream(
+        t, dt, excitatory_events, next_exc_idx, p, sign=+1.0)
+    inh_contribution, next_inh_idx = _consume_event_stream(
+        t, dt, inhibitory_events, next_inh_idx, p, sign=-1.0)
+
+    return exc_contribution + inh_contribution, next_exc_idx, next_inh_idx
+
+
+def crank_nicolson_balanced(t_span, V0, A, p: ConicalNumericalCableParameters,
+                             excitatory_events, inhibitory_events, saved_frames=1, verbose=False):
+    """
+    Same Crank-Nicolson stepping as TaperredDendritesPDE.crank_nicolson, but injects
+    from two separate signed event streams via synaptic_spike_train_input_balanced.
+    """
+    t0, tf = t_span
+
+    num_steps = int(np.ceil((tf - t0) / p.dt))
+    save_every = int(np.ceil(num_steps / saved_frames))
+    num_save = num_steps // save_every + 1
+
+    times = np.zeros(num_save) * t0
+    sol = np.zeros((num_save, len(V0)))
+
+    I = eye(A.shape[0], format="csc")
+    L = (I - 0.5 * p.dt * A).tocsc()
+    R = (I + 0.5 * p.dt * A).tocsc()
+    solve = factorized(L)
+
+    t = t0
+    V = V0.copy()
+    times[0] = t
+    sol[0] = V
+
+    next_exc_idx = 0
+    next_inh_idx = 0
+    for step in range(1, num_steps + 1):
+        dt_step = min(p.dt, tf - t)
+
+        synaptic_input_at_t, next_exc_idx, next_inh_idx = synaptic_spike_train_input_balanced(
+            t=t, dt=p.dt, excitatory_events=excitatory_events, inhibitory_events=inhibitory_events,
+            next_exc_idx=next_exc_idx, next_inh_idx=next_inh_idx, p=p)
+        input_t = p.dt * 1 / p.c_m * synaptic_input_at_t
+
+        rhs = R @ V + input_t
+        V = solve(rhs)
+
+        t += dt_step
+
+        if step % save_every == 0:
+            iteration = step // save_every
+            if verbose:
+                print(f"[CN-balanced {iteration}/{num_save}] step {step}/{num_steps}")
+            times[iteration] = t
+            sol[iteration] = V
+
+    return times, sol
+
+
+def simulate_crank_nicolson_unitless_closed_tapered_cylinder_balance_with_param(
+        p: ConicalNumericalCableParameters, excitatory_events, inhibitory_events,
+        t_max=to_SI(30 * second) / 1000, saved_frames=1200, verbose=True, plot=False, save=False,
+        simulation_label="balanced"):
+    if verbose:
+        print(f"Simulating balanced Crank-Nicolson unitless cone with dt = {p.dt: .5e}")
+
+    x = p.x
+    dx = p.dx
+    tau = p.tau
+
+    a = p.a()
+    b = p.b(x)
+
+    lower = b[1:] / dx ** 2 + a / (2 * dx)
+    main = -1 / tau - 2 * b / dx ** 2
+    upper = b[:-1] / dx ** 2 - a / (2 * dx)
+
+    A = diags(diagonals=[lower, main, upper], offsets=[-1, 0, 1], format="lil")
+
+    u0 = np.zeros(len(x))
+
+    times, V_s = crank_nicolson_balanced(
+        t_span=(0, t_max), V0=u0, A=A, saved_frames=saved_frames, p=p,
+        excitatory_events=excitatory_events, inhibitory_events=inhibitory_events, verbose=verbose)
+
+    if excitatory_events.size and inhibitory_events.size:
+        all_events = np.hstack([excitatory_events, inhibitory_events])
+    else:
+        all_events = excitatory_events if excitatory_events.size else inhibitory_events
+
+    if save:
+        save_simulation(times=times, V_s=V_s, p=p, events=all_events, t_max=t_max,
+                         simulation_label=simulation_label)
+
+    if plot:
+        plot_difussion_unitless_spike_train(times=times, V_s=V_s, p=p, events=all_events,
+                                             sim_type=f"Crank-Nicolson unitless balanced {simulation_label}",
+                                             save=True)
+
+    return times, V_s
+
+
+def simulate_balanced_input_with_uniform(p: ConicalNumericalCableParameters, t_max=to_SI(1 * second),
+                                          e_limits: tuple[float, float] = (0.0, to_SI(500 * um)),
+                                          i_limits: tuple[float, float] = (0.0, to_SI(500 * um))):
+    if have_same_dimensions(t_max, second):
+        t_max = to_SI(t_max)
+
+    r_e_density = 0.02 * Hz / um
+    r_i_density = 0.01 * Hz / um
+
+    e_left, e_right = e_limits
+    i_left, i_right = i_limits
+
+    r_e = r_e_density * (e_right - e_left) * meter
+    r_i = r_i_density * (i_right - i_left) * meter
+    exc_x_distribution = uniform(loc=e_left, scale=e_right - e_left)
+    inh_x_distribution = uniform(loc=i_left, scale=i_right - i_left)
+
+    spike_train_excitatory = create_delta_pulses(
+        t_max=t_max,
+        x_distribution=exc_x_distribution,
+        t_distribution=expon(scale=1.0 / r_e),
+    )
+
+    spike_train_inhibitory = create_delta_pulses(
+        t_max=t_max,
+        x_distribution=inh_x_distribution,
+        t_distribution=expon(scale=1.0 / r_i),
+    )
+
+    return simulate_crank_nicolson_unitless_closed_tapered_cylinder_balance_with_param(
+        p=p,
+        t_max=t_max,
+        excitatory_events=spike_train_excitatory,
+        inhibitory_events=spike_train_inhibitory,
+        verbose=True,
+        plot=True,
+        save=True,
+        saved_frames=3 * 10 ** 4,
+        simulation_label=experiment_label_for_uniform_balance(e_limits, i_limits))

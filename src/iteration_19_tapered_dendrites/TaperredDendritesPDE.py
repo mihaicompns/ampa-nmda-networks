@@ -14,15 +14,15 @@ from scipy.sparse import diags, eye
 from scipy.sparse.linalg import factorized
 from scipy.stats import expon, uniform
 
-from Plotting import show_plots_non_blocking
-from iteration_19_tapered_dendrites.CylindricalDendritesPDE import dirac_delta_unitless, \
-    plot_tuckwell_solution_closed_cable_unitless_separation_of_variables, \
-    plot_tuckwell_solution_closed_cable_unitless_method_of_images
-from iteration_19_tapered_dendrites.conical_data import ConicalCableParameters, ConicalNumericalCableParameters, \
-    create_delta_pulses
-from iteration_19_tapered_dendrites.data import to_SI
-
 import re
+
+from src.Plotting import show_plots_non_blocking
+from src.iteration_19_tapered_dendrites.CylindricalDendritesPDE import \
+    plot_tuckwell_solution_closed_cable_unitless_separation_of_variables, \
+    plot_tuckwell_solution_closed_cable_unitless_method_of_images, dirac_delta_unitless
+from src.iteration_19_tapered_dendrites.conical_data import ConicalNumericalCableParameters, ConicalCableParameters, \
+    create_delta_pulses
+from src.iteration_19_tapered_dendrites.data import to_SI
 
 
 # TODO: Normalize the way Dayan has it. ie = Ie τm δ(x)δ(t)/ 2πa. A is the radius! We have a slightly different formulation. But Still

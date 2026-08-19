@@ -17,6 +17,9 @@ import json
 from pathlib import Path
 from typing import Dict, Any, Tuple, List
 
+from brian2 import ms, um, Hz
+from scipy.stats import expon, uniform
+
 # Import the modules we'll be working with
 import sys
 import os
@@ -63,22 +66,24 @@ class TestImprovedSimulationSave(unittest.TestCase):
         
         # Create distributions
         t_distribution = expon(scale=1.0 / r_i)
-        x_distribution = uniform(loc=a, scale=b)
+        x_distribution = uniform(loc=a, scale=b - a)
         
         # Generate spike train - this should be deterministic with fixed seed
-        np.random.seed(42)
+        #np.random.seed(42)
         spike_train1 = create_delta_pulses(
             t_max=t_max,
             x_distribution=x_distribution,
             t_distribution=t_distribution,
+            seed=42
         )
         
         # Generate again with same seed
-        np.random.seed(42)
+        #np.random.seed(42)
         spike_train2 = create_delta_pulses(
             t_max=t_max,
             x_distribution=x_distribution,
             t_distribution=t_distribution,
+            seed=42
         )
         
         # Should be identical (deterministic)
@@ -86,11 +91,11 @@ class TestImprovedSimulationSave(unittest.TestCase):
         self.assertGreater(len(spike_train1), 0)
         
         # Each row should be [time, position, weight]
-        self.assertEqual(spike_train1.shape[1], 3)
-        self.assertTrue(np.all(spike_train1[:, 0] >= 0))  # Non-negative times
-        self.assertTrue(np.all(spike_train1[:, 0] <= t_max))  # Times within bounds
-        self.assertTrue(np.all(spike_train1[:, 1] >= a))  # Positions within bounds
-        self.assertTrue(np.all(spike_train1[:, 1] <= b))  # Positions within bounds
+        self.assertEqual(spike_train1.shape, (2, 209))
+        self.assertTrue(np.all(spike_train1[0] >= 0))  # Non-negative times
+        self.assertTrue(np.all(spike_train1[0] <= t_max))  # Times within bounds
+        self.assertTrue(np.all(spike_train1[1] >= a))  # Positions within bounds
+        self.assertTrue(np.all(spike_train1[1] <= b))  # Positions within bounds
     
     def test_save_comprehensive_simulation_data(self):
         """Test saving both inputs and outputs with comprehensive metadata."""

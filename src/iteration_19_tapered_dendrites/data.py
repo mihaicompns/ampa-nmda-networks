@@ -111,6 +111,12 @@ class NumericalCableParameters:
             f"  Ie  = {self.I_e:.4e} A"
         )
 
+    def radius(self, x):
+        """
+        Local radius r(x) [m]. Constant along the cable for a cylinder.
+        """
+        return np.full_like(np.asarray(x, dtype=float), self.r0)
+
     def lambd(self):
         return math.sqrt(self.r0 * self.rm / (2 * self.ra))
 

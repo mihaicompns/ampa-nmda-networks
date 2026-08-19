@@ -79,13 +79,13 @@ def run_balanced_simulation(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Run a simulation with balanced excitatory/inhibitory inputs.
-    
+
     This function provides a clean interface for running balanced input simulations
     and eliminates duplication of simulation setup code.
-    
+
     In a full implementation, this would call the actual PDE solver.
     For now, we provide a deterministic simulation that can be refined.
-    
+
     Parameters
     ----------
     events : List[Tuple[float, float, float]]
@@ -104,7 +104,7 @@ def run_balanced_simulation(
         Whether to print progress information
     simulation_label : str
         Label for the simulation
-        
+
     Returns
     -------
     Tuple[np.ndarray, np.ndarray]
@@ -113,38 +113,38 @@ def run_balanced_simulation(
     # Input validation
     if not events:
         raise ValueError("Events list cannot be empty")
-    
+
     if x_N < 3:
         raise ValueError("x_N must be at least 3")
-    
+
     if dt_ <= 0:
         raise ValueError("dt_ must be positive")
-    
+
     if t_max <= 0:
         raise ValueError("t_max must be positive")
-    
+
     if L <= 0:
         raise ValueError("L must be positive")
-    
+
     if saved_frames < 1:
         raise ValueError("saved_frames must be at least 1")
-    
+
     # Create time points
     times = np.linspace(0, t_max, int(t_max / dt_) + 1)
-    
+
     # Create voltage matrix (spatial points x time points)
     # This is a placeholder - in real implementation, this would come from PDE solver
     V_s = np.zeros((x_N, len(times)))
-    
+
     # Add deterministic signal based on events (eliminates duplication of signal generation)
     for event_time, event_position, event_weight in events:
         # Find closest time index
         time_idx = np.argmin(np.abs(times - event_time))
-        
+
         # Find closest spatial index (assuming uniform spacing from 0 to L)
         space_idx = int(np.round((event_position / L) * (x_N - 1)))
         space_idx = max(0, min(x_N - 1, space_idx))  # Clamp to valid range
-        
+
         # Add contribution to the voltage (simplified model)
         # In real implementation, this would involve solving the PDE
         if time_idx < len(times) - 1:  # Not the last time point
@@ -154,27 +154,21 @@ def run_balanced_simulation(
                 if time_diff >= 0:
                     # Temporal decay
                     temp_factor = np.exp(-time_diff / 5.0)  # 5ms time constant
-                    
+
                     # Spatial decay from event location
                     for x_idx in range(x_N):
                         space_dist = abs(x_idx - space_idx) * (L / (x_N - 1))
                         space_factor = np.exp(-space_dist / 50.0)  # 50um space constant
-                        
+
                         V_s[x_idx, t_idx] += event_weight * temp_factor * space_factor * 0.1
-    
-    # Add some baseline activity to make it more realistic
-    V_s += np.random.normal(0, 0.01, V_s.shape)
-    
-    # Apply reasonable bounds (biophysical constraints)
-    V_s = np.clip(V_s, -0.200, 0.100)  # -200mV to +100mV
-    
+
     if verbose:
         print(f"Simulation completed: {simulation_label}")
         print(f"  Time points: {len(times)}")
         print(f"  Spatial points: {x_N}")
         print(f"  Events processed: {len(events)}")
         print(f"  Voltage range: [{np.min(V_s):.3f}, {np.max(V_s):.3f}]")
-    
+
     return times, V_s
 
 
