@@ -11,8 +11,6 @@ Requirements:
 """
 
 import json
-import os
-# Import the modules we'll be working with
 import sys
 import unittest
 from pathlib import Path
@@ -22,7 +20,12 @@ from brian2 import ms, um, Hz
 from brian2.units.allunits import pampere
 from scipy.stats import expon, uniform
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SRC_ROOT = REPO_ROOT / "src"
+ITERATION_SRC = SRC_ROOT / "iteration_19_tapered_dendrites"
+for path in (REPO_ROOT, SRC_ROOT, ITERATION_SRC):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 from TaperredDendritesPDE import (
     default_params,
@@ -36,6 +39,7 @@ from CylindricalDendritesEventSimulation import (
     simulate_crank_nicolson_unitless_closed_cylinder_balance_with_param,
 )
 from ImprovedSimulationSave import (
+    BalancedSimulationMetadata,
     run_and_save_balanced_conical_simulation,
     run_and_save_balanced_cylindrical_simulation,
     run_and_save_balanced_conical_with_cylindrical_comparison,
@@ -43,6 +47,149 @@ from ImprovedSimulationSave import (
     sim_cylindrical,
     submit_balanced_conical_with_cylindrical_comparison,
 )
+import ImprovedSimulationSave as save_workflow
+
+
+class FakeConicalParameters:
+    L = 2_000e-6
+    x = np.array([0.0, 1_000e-6, 2_000e-6])
+    dx = 1_000e-6
+    r_at_0 = 1e-6
+    r_at_L = 0.5e-6
+    tau = 0.02
+    dt = 1e-5
+    I_e = 150e-12
+    I_i = 750e-12
+
+
+def fake_solver(p, excitatory_events, inhibitory_events, t_max, saved_frames, verbose):
+    return np.array([0.0, t_max]), np.zeros((2, len(p.x)))
+
+
+def test_different_simulation_metadata_is_saved_to_distinct_directories(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        save_workflow,
+        "simulate_crank_nicolson_unitless_closed_tapered_cone_balance_with_param",
+        fake_solver,
+    )
+
+    shared_kwargs = {
+        "p": FakeConicalParameters(),
+        "output_root": tmp_path,
+        "simulation_label": "balanced",
+        "excitatory_events": np.array([[0.001], [500e-6]]),
+        "inhibitory_events": np.array([[0.0015], [1_000e-6]]),
+        "plot": False,
+        "show_plot": False,
+    }
+
+    first = run_and_save_balanced_conical_simulation(
+        **shared_kwargs,
+        t_max=0.1,
+        e_limits=(500e-6, 1_000e-6),
+        i_limits=(1_000e-6, 2_000e-6),
+        r_e_density=0.4 * Hz / um,
+        r_i_density=0.1 * Hz / um,
+        g=5.0,
+    )
+    second = run_and_save_balanced_conical_simulation(
+        **shared_kwargs,
+        t_max=0.2,
+        e_limits=(0.0, 500e-6),
+        i_limits=(500e-6, 1_000e-6),
+        r_e_density=0.8 * Hz / um,
+        r_i_density=0.2 * Hz / um,
+        g=4.0,
+    )
+
+    expected_first_dir = (
+        tmp_path /
+        "balanced__e_500_1000um__i_1000_2000um__re_0p4hz_per_um__ri_0p1hz_per_um__"
+        "t_100ms__dt_10000000ps__mol_n_3__g_5"
+    )
+    expected_second_dir = (
+        tmp_path /
+        "balanced__e_0_500um__i_500_1000um__re_0p8hz_per_um__ri_0p2hz_per_um__"
+        "t_200ms__dt_10000000ps__mol_n_3__g_4"
+    )
+
+    assert first.save_dir != second.save_dir
+    assert first.save_dir == expected_first_dir
+    assert second.save_dir == expected_second_dir
+    assert first.metadata_file.exists()
+    assert second.metadata_file.exists()
+    assert len([path for path in tmp_path.iterdir() if path.is_dir()]) == 2
+
+
+def test_static_events_without_limits_generate_complete_label_from_events_and_cable(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        save_workflow,
+        "simulate_crank_nicolson_unitless_closed_tapered_cone_balance_with_param",
+        fake_solver,
+    )
+
+    result = run_and_save_balanced_conical_simulation(
+        p=FakeConicalParameters(),
+        t_max=0.1,
+        output_root=tmp_path,
+        simulation_label="balanced",
+        excitatory_events=np.array([
+            [0.001, 0.002, 0.003],
+            [500e-6, 750e-6, 1_000e-6],
+        ]),
+        inhibitory_events=np.array([
+            [0.0015],
+            [1_000e-6],
+        ]),
+        r_e_density=0.4 * Hz / um,
+        r_i_density=0.1 * Hz / um,
+        g=5.0,
+        plot=False,
+        show_plot=False,
+    )
+
+    expected_dir = (
+        tmp_path /
+        "balanced__e_500_1000um__i_0_2000um__re_0p4hz_per_um__ri_0p1hz_per_um__"
+        "t_100ms__dt_10000000ps__mol_n_3__g_5"
+    )
+
+    assert result.save_dir == expected_dir
+    assert result.metadata_file.exists()
+
+
+def test_brunel_metadata_factory_save_label_uses_documented_static_design():
+    metadata = BalancedSimulationMetadata.from_brunel_params(
+        simulation_label="balanced",
+        e_limits=(500e-6, 1_000e-6),
+        i_limits=(1_000e-6, 2_000e-6),
+        t_max=0.1,
+        gamma=0.25,
+        g=5.0,
+        base_rate=0.4 * Hz / um,
+        base_I_e_strength=150e-12,
+    )
+    expected_label = (
+        "balanced__e_500_1000um__i_1000_2000um__"
+        "re_0p4hz_per_um__ri_0p1hz_per_um__"
+        "t_100ms__dt_10000ps__mol_n_101__g_5"
+    )
+
+    assert metadata.r_e_density == 0.4 * Hz / um
+    assert metadata.r_i_density == 0.1 * Hz / um
+    assert metadata.g == 5.0
+    assert metadata.save_label() == expected_label
+
+    alias_metadata = BalancedSimulationMetadata.from_brunnel_params(
+        simulation_label="balanced",
+        e_limits=(500e-6, 1_000e-6),
+        i_limits=(1_000e-6, 2_000e-6),
+        t_max=0.1,
+        gamma=0.25,
+        g=5.0,
+        base_rate=0.4 * Hz / um,
+    )
+    assert alias_metadata.save_label() == expected_label
 
 
 class TestImprovedSimulationSave(unittest.TestCase):
@@ -726,7 +873,12 @@ class TestImprovedSimulationSave(unittest.TestCase):
             max_workers=2,
         )
 
-        self.assertEqual(submitted.save_dir, self.test_dir / "submitted_static_comparison")
+        expected_save_dir = (
+            self.test_dir /
+            "submitted_static_comparison__e_0_100um__i_0_100um__re_0p4hz_per_um__"
+            "ri_0p1hz_per_um__t_1ms__dt_10000000ps__mol_n_31"
+        )
+        self.assertEqual(submitted.save_dir, expected_save_dir)
         self.assertEqual(set(submitted.futures.values()), {"conical", "cylindrical"})
 
         comparison = submitted.result()

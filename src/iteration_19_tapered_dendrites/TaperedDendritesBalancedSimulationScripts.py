@@ -7,12 +7,13 @@ repository, while keeping them outside automated test discovery.
 """
 
 import argparse
+import itertools
 import sys
 from pathlib import Path
 
 import numpy as np
 from brian2 import Hz, second, um
-from brian2.units import ms
+from brian2.units import ms, meter
 from brian2.units.allunits import pampere
 from joblib import Parallel, delayed
 from scipy.stats import expon, uniform
@@ -39,6 +40,7 @@ from src.iteration_19_tapered_dendrites.TaperredDendritesBalancedCrankNicolson i
 from src.iteration_19_tapered_dendrites.ImprovedSimulationSave import (
     run_and_save_balanced_conical_with_cylindrical_comparison,
     run_and_save_balanced_conical_simulation,
+    submit_balanced_conical_with_cylindrical_comparison,
 )
 
 
@@ -166,6 +168,7 @@ def test_run_balanced_2000um_example(t_max=to_SI(1 * second)):
         N=201,
         L=L,
         I_e=to_SI(15 * pampere),
+        I_i=to_SI(30 * pampere),
     ).to_numerical()
 
     return run_and_save_balanced_conical_with_cylindrical_comparison(
@@ -182,6 +185,19 @@ def test_run_balanced_2000um_example(t_max=to_SI(1 * second)):
     )
 
 
+def test_sim_one_example():
+    L = to_SI(2000 * um)
+
+    p = default_params.with_SI_properties(
+        dt=to_SI(1e-8 * second),
+        N=201,
+        L=L,
+        I_e=to_SI(15 * pampere),
+        I_i=to_SI(30 * pampere),
+    ).to_numerical()
+
+    return simulate_balanced_input_with_uniform(p=p, t_max=to_SI(1 * second), e_limits=(0, L), i_limits=(0.0, L))
+
 def _fractional_limit_sets(L):
     return [
         (0.0, L),
@@ -192,6 +208,13 @@ def _fractional_limit_sets(L):
         (0.25 * L, 0.75 * L),
         (0.5 * L, 0.75 * L),
     ]
+
+
+def _um_label(value):
+    return int(round(value / to_SI(1 * um)))
+
+
+DEFAULT_LIMIT_SETS = object()
 
 
 def run_balanced_limit_sweep_500um(t_max=to_SI(10 * second)):
@@ -208,32 +231,73 @@ def run_balanced_limit_sweep_500um(t_max=to_SI(10 * second)):
             p=p,
             t_max=t_max,
             e_limits=(a, b),
-            i_limits=(a, b),
+            i_limits=(c, d),
         )
-        for a, b in _fractional_limit_sets(L)
+        for a, b, c, d in itertools.product(_fractional_limit_sets(L), _fractional_limit_sets(L))
     )
 
 
-def run_balanced_limit_sweep_1000um(t_max=to_SI(10 * second)):
-    L = to_SI(1000 * um)
-    p = default_params.with_SI_properties(
+def test_run_balanced_limit_sweep_1000um(
+        L = to_SI(1000 * um),
+        t_max=to_SI(2 * second),
+        limit_sets=DEFAULT_LIMIT_SETS,
+        output_root=None,
+        p=None,
         dt=to_SI(1e-8 * second),
         N=101,
-        L=L,
-        I_e=to_SI(15 * pampere),
-    ).to_numerical()
+        I_e=to_SI(10 * pampere),
+        I_i=to_SI(40 * pampere),
+        r_e_density=0.4 * Hz / um,
+        r_i_density=0.1 * Hz / um,
+        g=None,
+        saved_frames=3 * 10 ** 4,
+        verbose=False,
+        plot=True,
+        show_plot=True,
+        max_workers=2):
+    if p is None:
+        p = default_params.with_SI_properties(
+            dt=dt,
+            N=N,
+            L=L,
+            I_e=I_e,
+            I_i=I_i,
+        ).to_numerical()
 
-    return Parallel(n_jobs=-3, verbose=10)(
-        delayed(simulate_balanced_input_with_uniform)(
-            p=p,
+    if limit_sets is DEFAULT_LIMIT_SETS:
+        limit_sets = _fractional_limit_sets(L)
+    if output_root is None:
+        output_root = Path("saved_simulations") / "combinations_2s" / f"{int(L * meter / um)}um"
+    else:
+        output_root = Path(output_root)
+    if g is None:
+        g = float(to_SI(I_i) / to_SI(I_e))
+
+    submitted = [
+        submit_balanced_conical_with_cylindrical_comparison(
+            conical_p=p,
             t_max=t_max,
+            output_root=output_root,
+            simulation_label=f"ei_{_um_label(a)}um_{_um_label(b)}um",
             e_limits=(a, b),
-            i_limits=(a, b),
+            i_limits=(c, d),
+            r_e_density=r_e_density,
+            r_i_density=r_i_density,
+            g=g,
+            saved_frames=saved_frames,
+            verbose=verbose,
+            plot=plot,
+            show_plot=show_plot,
+            max_workers=max_workers,
         )
-        for a, b in _fractional_limit_sets(L)
-    )
+        for (a, b), (c, d) in itertools.product(limit_sets, limit_sets)
+    ]
 
-@staticmethod
+    return [job.result() for job in submitted]
+
+def test_run_balanced_limit_sweep_2000um():
+    test_run_balanced_limit_sweep_1000um(L=to_SI(2000 * um), t_max=to_SI(2 * second))
+
 def test_run_balanced_limit_sweep_1500um(t_max=to_SI(0.001 * second)):
     L = to_SI(1500 * um)
     limits = [
@@ -267,7 +331,7 @@ def test_run_balanced_limit_sweep_1500um(t_max=to_SI(0.001 * second)):
         )
         for a, b in limits
     )
-
+    
 
 SCENARIOS = {
     "one-spike-sweep": run_one_spike_position_sweep,
@@ -276,8 +340,9 @@ SCENARIOS = {
     "balanced-500um": run_balanced_500um_example,
     "balanced-2000um": test_run_balanced_2000um_example,
     "balanced-sweep-500um": run_balanced_limit_sweep_500um,
-    "balanced-sweep-1000um": run_balanced_limit_sweep_1000um,
+    "balanced-sweep-1000um": test_run_balanced_limit_sweep_1000um,
     "balanced-sweep-1500um": test_run_balanced_limit_sweep_1500um,
+    "sim-one-example": test_sim_one_example,
 }
 
 

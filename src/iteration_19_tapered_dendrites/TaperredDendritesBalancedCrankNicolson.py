@@ -41,15 +41,16 @@ def _consume_event_stream(t, dt, events, next_idx, p, current_amplitude, sign):
     Consume all events in `events` that occur in [t, t+dt), returning their
     combined contribution (with the given sign) and the updated next_idx.
     """
-    contribution = np.zeros_like(p.x)
-
     if events.size == 0 or next_idx >= events.shape[1]:
-        return contribution, next_idx
+        return None, next_idx
 
     event_times, event_positions = events
     n_events = len(event_times)
     t_end = t + dt
+    if event_times[next_idx] >= t_end:
+        return None, next_idx
 
+    contribution = np.zeros_like(p.x)
     while next_idx < n_events:
         spike_t = event_times[next_idx]
 
@@ -91,6 +92,10 @@ def synaptic_spike_train_input_balanced(t, dt, excitatory_events, inhibitory_eve
     inh_contribution, next_inh_idx = _consume_event_stream(
         t, dt, inhibitory_events, next_inh_idx, p, current_amplitude=p.I_i, sign=-1.0)
 
+    if exc_contribution is None:
+        return inh_contribution, next_exc_idx, next_inh_idx
+    if inh_contribution is None:
+        return exc_contribution, next_exc_idx, next_inh_idx
     return exc_contribution + inh_contribution, next_exc_idx, next_inh_idx
 
 
@@ -127,9 +132,9 @@ def crank_nicolson_balanced(t_span, V0, A, p: ConicalNumericalCableParameters,
         synaptic_input_at_t, next_exc_idx, next_inh_idx = synaptic_spike_train_input_balanced(
             t=t, dt=p.dt, excitatory_events=excitatory_events, inhibitory_events=inhibitory_events,
             next_exc_idx=next_exc_idx, next_inh_idx=next_inh_idx, p=p)
-        input_t = p.dt * 1 / p.c_m * synaptic_input_at_t
-
-        rhs = R @ V + input_t
+        rhs = R @ V
+        if synaptic_input_at_t is not None:
+            rhs = rhs + p.dt * 1 / p.c_m * synaptic_input_at_t
         V = solve(rhs)
 
         t += dt_step
@@ -227,7 +232,7 @@ def simulate_balanced_input_with_uniform(p: ConicalNumericalCableParameters, t_m
         t_max=t_max,
         excitatory_events=spike_train_excitatory,
         inhibitory_events=spike_train_inhibitory,
-        verbose=True,
+        verbose=False,
         saved_frames=3 * 10 ** 4)
     plot_crank_nicolson_unitless_closed_tapered_cone_balance(
         times=times,

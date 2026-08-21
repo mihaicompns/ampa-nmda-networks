@@ -7,13 +7,13 @@ balanced simulation, save inputs/outputs/metadata/statistics, and return the
 generated results.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 import json
 import multiprocessing
 import re
-from typing import Optional
+from typing import Optional, Any
 
 import numpy as np
 from brian2 import Hz, second, um, meter, have_same_dimensions
@@ -45,6 +45,85 @@ class SavedBalancedConicalSimulation:
     inhibitory_events: np.ndarray
     metadata: dict
     statistics: dict
+
+
+@dataclass(frozen=True)
+class BalancedSimulationMetadata:
+    """
+    Parameters that identify a saved balanced simulation on disk.
+    """
+    simulation_label: str
+    e_limits: Optional[tuple[float, float]]
+    i_limits: Optional[tuple[float, float]]
+    r_e_density: Any
+    r_i_density: Any
+    t_max: float
+    dt: float = 1e-8
+    spatial_points: int = 101
+    g: Optional[float] = None
+    seed: Optional[int] = None
+    gamma: Optional[float] = None
+    base_rate: Any = None
+    base_I_e_strength: Any = None
+
+    @classmethod
+    def from_brunel_params(
+            cls,
+            simulation_label: str,
+            e_limits: tuple[float, float],
+            i_limits: tuple[float, float],
+            t_max,
+            gamma: float,
+            g: float,
+            dt=1e-8,
+            spatial_points: int = 101,
+            base_rate=0.4 * Hz / um,
+            base_I_e_strength=None,
+            seed: Optional[int] = None):
+        """
+        Build simulation metadata from Brunel-style balance parameters.
+
+        gamma scales the inhibitory event density relative to the excitatory
+        density. g records the inhibitory-to-excitatory strength ratio.
+        """
+        return cls(
+            simulation_label=simulation_label,
+            e_limits=e_limits,
+            i_limits=i_limits,
+            r_e_density=base_rate,
+            r_i_density=gamma * base_rate,
+            t_max=to_SI(t_max),
+            dt=to_SI(dt),
+            spatial_points=spatial_points,
+            g=g,
+            seed=seed,
+            gamma=gamma,
+            base_rate=base_rate,
+            base_I_e_strength=base_I_e_strength,
+        )
+
+    @classmethod
+    def from_brunnel_params(cls, *args, **kwargs):
+        return cls.from_brunel_params(*args, **kwargs)
+
+    # Folder design:
+    # <label>__e_<left>_<right>um__i_<left>_<right>um__
+    # re_<hz_per_um>hz_per_um__ri_<hz_per_um>hz_per_um__
+    # t_<duration_ms>ms__dt_<time_step_ps>ps__mol_n_<spatial_points>__g_<ratio>
+    def save_label(self) -> str:
+        pieces = [
+            self.simulation_label,
+            _limits_label("e", self.e_limits),
+            _limits_label("i", self.i_limits),
+            f"re_{_rate_density_label(self.r_e_density)}",
+            f"ri_{_rate_density_label(self.r_i_density)}",
+            f"t_{_duration_label(self.t_max)}",
+            f"dt_{_picosecond_label(self.dt)}ps",
+            f"mol_n_{int(self.spatial_points)}",
+        ]
+        if self.g is not None:
+            pieces.append(f"g_{_number_label(self.g)}")
+        return _safe_label("__".join(piece for piece in pieces if piece))
 
 
 @dataclass
@@ -81,6 +160,129 @@ def _safe_label(label: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]+", "_", label.strip().lower()).strip("_")
 
 
+def _as_float(value) -> float:
+    try:
+        return float(to_SI(value))
+    except Exception:
+        return float(value)
+
+
+def _number_label(value, precision: int = 6) -> str:
+    text = f"{_as_float(value):.{precision}g}"
+    return text.replace("-", "m").replace(".", "p")
+
+
+def _um_value(value) -> float:
+    return _as_float(value) / 1e-6
+
+
+def _um_label(value) -> str:
+    value_um = _um_value(value)
+    if abs(value_um - round(value_um)) < 1e-9:
+        return str(int(round(value_um)))
+    return _number_label(value_um)
+
+
+def _limits_label(prefix: str, limits: Optional[tuple[float, float]]) -> str:
+    if limits is None:
+        return ""
+    left, right = limits
+    return f"{prefix}_{_um_label(left)}_{_um_label(right)}um"
+
+
+def _rate_density_label(value) -> str:
+    return f"{_number_label(_rate_density_hz_per_um(value))}hz_per_um"
+
+
+def _rate_density_hz_per_um(value) -> float:
+    try:
+        if have_same_dimensions(value, Hz / um):
+            return float(value / (Hz / um))
+    except Exception:
+        pass
+    return _as_float(value)
+
+
+def _duration_label(value) -> str:
+    seconds = _as_float(value)
+    milliseconds = seconds * 1000.0
+    if abs(milliseconds - round(milliseconds)) < 1e-9:
+        return f"{int(round(milliseconds))}ms"
+    return f"{_number_label(milliseconds)}ms"
+
+
+def _picosecond_label(value) -> str:
+    picoseconds = _as_float(value) / 1e-12
+    if abs(picoseconds - round(picoseconds)) < 1e-6:
+        return str(int(round(picoseconds)))
+    return _number_label(picoseconds)
+
+
+def _simulation_metadata(
+        simulation_label: str,
+        t_max: float,
+        e_limits: Optional[tuple[float, float]],
+        i_limits: Optional[tuple[float, float]],
+        r_e_density,
+        r_i_density,
+        g: Optional[float],
+        seed: Optional[int],
+        dt: float,
+        spatial_points: int,
+        experiment_metadata: Optional[BalancedSimulationMetadata]) -> BalancedSimulationMetadata:
+    if experiment_metadata is not None:
+        return replace(
+            experiment_metadata,
+            e_limits=e_limits,
+            i_limits=i_limits,
+            t_max=t_max,
+            dt=dt,
+            spatial_points=spatial_points,
+        )
+    return BalancedSimulationMetadata(
+        simulation_label=simulation_label,
+        e_limits=e_limits,
+        i_limits=i_limits,
+        r_e_density=r_e_density,
+        r_i_density=r_i_density,
+        t_max=t_max,
+        dt=dt,
+        spatial_points=spatial_points,
+        g=g,
+        seed=seed,
+    )
+
+
+def _event_count(events: np.ndarray) -> int:
+    if events.size == 0:
+        return 0
+    return int(events.shape[1])
+
+
+def _full_cable_limits(p) -> tuple[float, float]:
+    return float(p.x[0]), float(p.x[-1])
+
+
+def _limits_from_static_events_or_cable(events: np.ndarray, p) -> tuple[float, float]:
+    if _event_count(events) > 2:
+        positions = events[1]
+        return float(np.min(positions)), float(np.max(positions))
+    return _full_cable_limits(p)
+
+
+def _complete_limits_for_label(
+        p,
+        excitatory_events: np.ndarray,
+        inhibitory_events: np.ndarray,
+        e_limits: Optional[tuple[float, float]],
+        i_limits: Optional[tuple[float, float]]) -> tuple[tuple[float, float], tuple[float, float]]:
+    if e_limits is None:
+        e_limits = _limits_from_static_events_or_cable(excitatory_events, p)
+    if i_limits is None:
+        i_limits = _limits_from_static_events_or_cable(inhibitory_events, p)
+    return e_limits, i_limits
+
+
 def _events_as_list(events: np.ndarray) -> list[list[float]]:
     return [[float(value) for value in row] for row in events.tolist()]
 
@@ -88,10 +290,9 @@ def _generate_uniform_events(
         t_max: float,
         e_limits: tuple[float, float],
         i_limits: tuple[float, float],
-        seed: Optional[int]):
-    r_e_density = 0.02 * Hz / um
-    r_i_density = 0.01 * Hz / um
-
+        seed: Optional[int],
+        r_e_density=0.4 * Hz / um,
+        r_i_density=0.1 * Hz / um):
     e_left, e_right = e_limits
     i_left, i_right = i_limits
 
@@ -123,6 +324,11 @@ def run_and_save_balanced_conical_simulation(
         inhibitory_events: Optional[np.ndarray] = None,
         e_limits: Optional[tuple[float, float]] = None,
         i_limits: Optional[tuple[float, float]] = None,
+        r_e_density=0.4 * Hz / um,
+        r_i_density=0.1 * Hz / um,
+        g: Optional[float] = None,
+        experiment_metadata: Optional[BalancedSimulationMetadata] = None,
+        include_metadata_in_save_dir: bool = True,
         seed: Optional[int] = None,
         saved_frames: int = 1200,
         verbose: bool = False,
@@ -148,13 +354,37 @@ def run_and_save_balanced_conical_simulation(
             t_max=t_max,
             e_limits=e_limits,
             i_limits=i_limits,
+            r_e_density=r_e_density,
+            r_i_density=r_i_density,
             seed=seed,
         )
 
     excitatory_events = np.asarray(excitatory_events, dtype=float)
     inhibitory_events = np.asarray(inhibitory_events, dtype=float)
+    e_limits, i_limits = _complete_limits_for_label(
+        p=p,
+        excitatory_events=excitatory_events,
+        inhibitory_events=inhibitory_events,
+        e_limits=e_limits,
+        i_limits=i_limits,
+    )
 
-    save_dir = Path(output_root) / _safe_label(simulation_label)
+    simulation_metadata = _simulation_metadata(
+        simulation_label=simulation_label,
+        t_max=t_max,
+        e_limits=e_limits,
+        i_limits=i_limits,
+        r_e_density=r_e_density,
+        r_i_density=r_i_density,
+        g=g,
+        seed=seed,
+        dt=p.dt,
+        spatial_points=len(p.x),
+        experiment_metadata=experiment_metadata,
+    )
+    save_label = simulation_metadata.save_label()
+    save_dir_name = save_label if include_metadata_in_save_dir else _safe_label(simulation_label)
+    save_dir = Path(output_root) / save_dir_name
     inputs_dir = save_dir / "inputs"
     outputs_dir = save_dir / "outputs"
     graphs_dir = save_dir / "graphs"
@@ -226,6 +456,7 @@ def run_and_save_balanced_conical_simulation(
     metadata = {
         "simulation_info": {
             "label": simulation_label,
+            "save_label": save_label,
             "deterministic": True,
             "simulator": "simulate_crank_nicolson_unitless_closed_tapered_cone_balance_with_param",
             "geometry_type": "tapered_cone",
@@ -244,16 +475,29 @@ def run_and_save_balanced_conical_simulation(
             "t_max_ms": float(t_max * 1000.0),
             "I_e_pA": float(p.I_e / 1e-12),
             "I_i_pA": float(p.I_i / 1e-12),
+            "g": None if g is None else float(g),
         },
         "input_info": {
             "seed": seed,
             "e_limits_m": None if e_limits is None else [float(e_limits[0]), float(e_limits[1])],
             "i_limits_m": None if i_limits is None else [float(i_limits[0]), float(i_limits[1])],
+            "r_e_density_hz_per_um": _rate_density_hz_per_um(simulation_metadata.r_e_density),
+            "r_i_density_hz_per_um": _rate_density_hz_per_um(simulation_metadata.r_i_density),
             "total_events": statistics["total_events"],
             "excitatory_events": statistics["excitatory_events"],
             "inhibitory_events": statistics["inhibitory_events"],
             "excitatory_spike_train": _events_as_list(excitatory_events),
             "inhibitory_spike_train": _events_as_list(inhibitory_events),
+        },
+        "brunel_parameters": {
+            "gamma": simulation_metadata.gamma,
+            "g": simulation_metadata.g,
+            "base_rate_hz_per_um": None
+            if simulation_metadata.base_rate is None
+            else _rate_density_hz_per_um(simulation_metadata.base_rate),
+            "base_I_e_strength": None
+            if simulation_metadata.base_I_e_strength is None
+            else _as_float(simulation_metadata.base_I_e_strength),
         },
         "files": {
             "inputs": str(inputs_file.relative_to(save_dir)),
@@ -293,6 +537,13 @@ def run_and_save_balanced_cylindrical_simulation(
         simulation_label: str,
         excitatory_events: np.ndarray,
         inhibitory_events: np.ndarray,
+        e_limits: Optional[tuple[float, float]] = None,
+        i_limits: Optional[tuple[float, float]] = None,
+        r_e_density=0.4 * Hz / um,
+        r_i_density=0.1 * Hz / um,
+        g: Optional[float] = None,
+        experiment_metadata: Optional[BalancedSimulationMetadata] = None,
+        include_metadata_in_save_dir: bool = True,
         seed: Optional[int] = None,
         saved_frames: int = 1200,
         verbose: bool = False,
@@ -305,8 +556,30 @@ def run_and_save_balanced_cylindrical_simulation(
     t_max = to_SI(t_max)
     excitatory_events = np.asarray(excitatory_events, dtype=float)
     inhibitory_events = np.asarray(inhibitory_events, dtype=float)
+    e_limits, i_limits = _complete_limits_for_label(
+        p=p,
+        excitatory_events=excitatory_events,
+        inhibitory_events=inhibitory_events,
+        e_limits=e_limits,
+        i_limits=i_limits,
+    )
 
-    save_dir = Path(output_root) / _safe_label(simulation_label)
+    simulation_metadata = _simulation_metadata(
+        simulation_label=simulation_label,
+        t_max=t_max,
+        e_limits=e_limits,
+        i_limits=i_limits,
+        r_e_density=r_e_density,
+        r_i_density=r_i_density,
+        g=g,
+        seed=seed,
+        dt=p.dt,
+        spatial_points=len(p.x),
+        experiment_metadata=experiment_metadata,
+    )
+    save_label = simulation_metadata.save_label()
+    save_dir_name = save_label if include_metadata_in_save_dir else _safe_label(simulation_label)
+    save_dir = Path(output_root) / save_dir_name
     inputs_dir = save_dir / "inputs"
     outputs_dir = save_dir / "outputs"
     graphs_dir = save_dir / "graphs"
@@ -379,6 +652,7 @@ def run_and_save_balanced_cylindrical_simulation(
     metadata = {
         "simulation_info": {
             "label": simulation_label,
+            "save_label": save_label,
             "deterministic": True,
             "simulator": "simulate_crank_nicolson_unitless_closed_cylinder_balance_with_param",
             "geometry_type": "uniform_cylinder",
@@ -396,14 +670,29 @@ def run_and_save_balanced_cylindrical_simulation(
             "t_max_ms": float(t_max * 1000.0),
             "I_e_pA": float(p.I_e / 1e-12),
             "I_i_pA": float(p.I_i / 1e-12),
+            "g": None if g is None else float(g),
         },
         "input_info": {
             "seed": seed,
+            "e_limits_m": None if e_limits is None else [float(e_limits[0]), float(e_limits[1])],
+            "i_limits_m": None if i_limits is None else [float(i_limits[0]), float(i_limits[1])],
+            "r_e_density_hz_per_um": _rate_density_hz_per_um(simulation_metadata.r_e_density),
+            "r_i_density_hz_per_um": _rate_density_hz_per_um(simulation_metadata.r_i_density),
             "total_events": statistics["total_events"],
             "excitatory_events": statistics["excitatory_events"],
             "inhibitory_events": statistics["inhibitory_events"],
             "excitatory_spike_train": _events_as_list(excitatory_events),
             "inhibitory_spike_train": _events_as_list(inhibitory_events),
+        },
+        "brunel_parameters": {
+            "gamma": simulation_metadata.gamma,
+            "g": simulation_metadata.g,
+            "base_rate_hz_per_um": None
+            if simulation_metadata.base_rate is None
+            else _rate_density_hz_per_um(simulation_metadata.base_rate),
+            "base_I_e_strength": None
+            if simulation_metadata.base_I_e_strength is None
+            else _as_float(simulation_metadata.base_I_e_strength),
         },
         "files": {
             "inputs": str(inputs_file.relative_to(save_dir)),
@@ -457,6 +746,10 @@ def submit_balanced_conical_with_cylindrical_comparison(
         simulation_label: str,
         e_limits: Optional[tuple[float, float]] = None,
         i_limits: Optional[tuple[float, float]] = None,
+        r_e_density=0.4 * Hz / um,
+        r_i_density=0.1 * Hz / um,
+        g: Optional[float] = None,
+        experiment_metadata: Optional[BalancedSimulationMetadata] = None,
         excitatory_events: Optional[np.ndarray] = None,
         inhibitory_events: Optional[np.ndarray] = None,
         seed: Optional[int] = None,
@@ -482,12 +775,35 @@ def submit_balanced_conical_with_cylindrical_comparison(
             t_max=t_max,
             e_limits=e_limits,
             i_limits=i_limits,
+            r_e_density=r_e_density,
+            r_i_density=r_i_density,
             seed=seed,
         )
     excitatory_events = np.asarray(excitatory_events, dtype=float)
     inhibitory_events = np.asarray(inhibitory_events, dtype=float)
+    e_limits, i_limits = _complete_limits_for_label(
+        p=conical_p,
+        excitatory_events=excitatory_events,
+        inhibitory_events=inhibitory_events,
+        e_limits=e_limits,
+        i_limits=i_limits,
+    )
 
-    base_dir = Path(output_root) / _safe_label(simulation_label)
+    simulation_metadata = _simulation_metadata(
+        simulation_label=simulation_label,
+        t_max=t_max,
+        e_limits=e_limits,
+        i_limits=i_limits,
+        r_e_density=r_e_density,
+        r_i_density=r_i_density,
+        g=g,
+        seed=seed,
+        dt=conical_p.dt,
+        spatial_points=len(conical_p.x),
+        experiment_metadata=experiment_metadata,
+    )
+    save_label = simulation_metadata.save_label()
+    base_dir = Path(output_root) / save_label
     cylindrical_p = conical_p.to_numerical_cylindrical_params()
 
     executor = ProcessPoolExecutor(
@@ -505,6 +821,11 @@ def submit_balanced_conical_with_cylindrical_comparison(
             inhibitory_events=inhibitory_events,
             e_limits=e_limits,
             i_limits=i_limits,
+            r_e_density=r_e_density,
+            r_i_density=r_i_density,
+            g=g,
+            experiment_metadata=simulation_metadata,
+            include_metadata_in_save_dir=False,
             seed=seed,
             saved_frames=saved_frames,
             verbose=verbose,
@@ -519,6 +840,13 @@ def submit_balanced_conical_with_cylindrical_comparison(
             simulation_label="cylindrical",
             excitatory_events=excitatory_events,
             inhibitory_events=inhibitory_events,
+            e_limits=e_limits,
+            i_limits=i_limits,
+            r_e_density=r_e_density,
+            r_i_density=r_i_density,
+            g=g,
+            experiment_metadata=simulation_metadata,
+            include_metadata_in_save_dir=False,
             seed=seed,
             saved_frames=saved_frames,
             verbose=verbose,
