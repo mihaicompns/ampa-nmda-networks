@@ -267,7 +267,7 @@ def test_run_balanced_limit_sweep_1000um(
     if limit_sets is DEFAULT_LIMIT_SETS:
         limit_sets = _fractional_limit_sets(L)
     if output_root is None:
-        output_root = Path("saved_simulations") / "combinations_2s" / f"{int(L * meter / um)}um"
+        output_root = Path("saved_simulations") / "faster_combinations_2s" / f"{int(L * meter / um)}um"
     else:
         output_root = Path(output_root)
     if g is None:
