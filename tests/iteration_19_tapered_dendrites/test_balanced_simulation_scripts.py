@@ -59,6 +59,32 @@ class TestBalancedSimulationScripts(unittest.TestCase):
             self.assertTrue(result.metadata_file.exists())
             self.assertTrue(result.statistics_file.exists())
 
+def test_run_balanced_limit_sweep_1000um_uses_one_bounded_runner(monkeypatch, tmp_path):
+    L = to_SI(1000 * um)
+    captured = {}
+
+    def fake_bounded_runner(comparison_kwargs, max_workers):
+        captured["comparison_kwargs"] = comparison_kwargs
+        captured["max_workers"] = max_workers
+        return [{"save_dir": tmp_path / str(index)} for index, _ in enumerate(comparison_kwargs)]
+
+    monkeypatch.setattr(scripts, "run_balanced_comparison_sweep", fake_bounded_runner)
+
+    results = scripts.test_run_balanced_limit_sweep_1000um(
+        t_max=to_SI(0.001 * ms),
+        limit_sets=[(0.0, L), (0.75 * L, L)],
+        output_root=tmp_path,
+        saved_frames=2,
+        verbose=False,
+        plot=False,
+        show_plot=False,
+        max_workers=12,
+    )
+
+    assert captured["max_workers"] == 12
+    assert len(captured["comparison_kwargs"]) == 4
+    assert len(results) == 4
+
 
 if __name__ == "__main__":
     unittest.main()

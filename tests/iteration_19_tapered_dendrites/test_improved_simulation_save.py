@@ -12,7 +12,9 @@ Requirements:
 
 import json
 import sys
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -64,6 +66,36 @@ class FakeConicalParameters:
 
 def fake_solver(p, excitatory_events, inhibitory_events, t_max, saved_frames, verbose):
     return np.array([0.0, t_max]), np.zeros((2, len(p.x)))
+
+
+def fake_bounded_save_command(**kwargs):
+    time.sleep(0.01)
+    return kwargs["simulation_label"]
+
+
+class TrackingThreadPoolExecutor(ThreadPoolExecutor):
+    submitted_labels = []
+    pending_count = 0
+    max_pending_count = 0
+
+    def __init__(self, *args, **kwargs):
+        kwargs.pop("mp_context", None)
+        super().__init__(*args, **kwargs)
+
+    def submit(self, fn, /, *args, **kwargs):
+        type(self).submitted_labels.append(kwargs["simulation_label"])
+        type(self).pending_count += 1
+        type(self).max_pending_count = max(
+            type(self).max_pending_count,
+            type(self).pending_count,
+        )
+        future = super().submit(fn, *args, **kwargs)
+
+        def mark_done(_):
+            type(self).pending_count -= 1
+
+        future.add_done_callback(mark_done)
+        return future
 
 
 def test_different_simulation_metadata_is_saved_to_distinct_directories(tmp_path, monkeypatch):
@@ -119,6 +151,57 @@ def test_different_simulation_metadata_is_saved_to_distinct_directories(tmp_path
     assert first.metadata_file.exists()
     assert second.metadata_file.exists()
     assert len([path for path in tmp_path.iterdir() if path.is_dir()]) == 2
+
+
+def test_balanced_comparison_sweep_submits_independent_pairs_in_bounded_order(tmp_path, monkeypatch):
+    TrackingThreadPoolExecutor.submitted_labels = []
+    TrackingThreadPoolExecutor.pending_count = 0
+    TrackingThreadPoolExecutor.max_pending_count = 0
+    monkeypatch.setattr(save_workflow, "ProcessPoolExecutor", TrackingThreadPoolExecutor)
+    monkeypatch.setattr(save_workflow, "sim_conical", fake_bounded_save_command)
+    monkeypatch.setattr(save_workflow, "sim_cylindrical", fake_bounded_save_command)
+
+    L = to_SI(100 * um)
+    p = default_params.with_SI_properties(
+        t=to_SI(1 * ms),
+        N=31,
+        dt=to_SI(0.01 * ms),
+        L=L,
+    ).to_numerical()
+
+    comparison_kwargs = [
+        {
+            "conical_p": p,
+            "t_max": to_SI(1 * ms),
+            "output_root": tmp_path,
+            "simulation_label": f"bounded_pair_{index}",
+            "e_limits": (0.0, L),
+            "i_limits": (0.0, L),
+            "saved_frames": 2,
+            "verbose": False,
+            "plot": False,
+            "show_plot": False,
+        }
+        for index in range(3)
+    ]
+
+    results = save_workflow.run_balanced_comparison_sweep(
+        comparison_kwargs,
+        max_workers=2,
+    )
+
+    assert len(results) == 3
+    assert all(result["conical"] == "conical" for result in results)
+    assert all(result["cylindrical"] == "cylindrical" for result in results)
+    assert TrackingThreadPoolExecutor.max_pending_count <= 2
+    assert TrackingThreadPoolExecutor.submitted_labels == [
+        "conical",
+        "cylindrical",
+        "conical",
+        "cylindrical",
+        "conical",
+        "cylindrical",
+    ]
 
 
 def test_static_events_without_limits_generate_complete_label_from_events_and_cable(tmp_path, monkeypatch):

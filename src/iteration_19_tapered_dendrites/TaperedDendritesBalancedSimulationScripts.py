@@ -40,6 +40,7 @@ from src.iteration_19_tapered_dendrites.TaperredDendritesBalancedCrankNicolson i
 from src.iteration_19_tapered_dendrites.ImprovedSimulationSave import (
     run_and_save_balanced_conical_with_cylindrical_comparison,
     run_and_save_balanced_conical_simulation,
+    run_balanced_comparison_sweep,
     submit_balanced_conical_with_cylindrical_comparison,
 )
 
@@ -251,10 +252,10 @@ def test_run_balanced_limit_sweep_1000um(
         r_i_density=0.1 * Hz / um,
         g=None,
         saved_frames=3 * 10 ** 4,
-        verbose=False,
+        verbose=True,
         plot=True,
         show_plot=True,
-        max_workers=2):
+        max_workers=12):
     if p is None:
         p = default_params.with_SI_properties(
             dt=dt,
@@ -267,33 +268,35 @@ def test_run_balanced_limit_sweep_1000um(
     if limit_sets is DEFAULT_LIMIT_SETS:
         limit_sets = _fractional_limit_sets(L)
     if output_root is None:
-        output_root = Path("saved_simulations") / "faster_combinations_2s" / f"{int(L * meter / um)}um"
+        output_root = Path("saved_simulations") / f"{int(L * meter / um)}um"
     else:
         output_root = Path(output_root)
     if g is None:
         g = float(to_SI(I_i) / to_SI(I_e))
 
-    submitted = [
-        submit_balanced_conical_with_cylindrical_comparison(
-            conical_p=p,
-            t_max=t_max,
-            output_root=output_root,
-            simulation_label=f"ei_{_um_label(a)}um_{_um_label(b)}um",
-            e_limits=(a, b),
-            i_limits=(c, d),
-            r_e_density=r_e_density,
-            r_i_density=r_i_density,
-            g=g,
-            saved_frames=saved_frames,
-            verbose=verbose,
-            plot=plot,
-            show_plot=show_plot,
-            max_workers=max_workers,
-        )
+    comparison_kwargs = [
+        {
+            "conical_p": p,
+            "t_max": t_max,
+            "output_root": output_root,
+            "simulation_label": "exponential_uniform",
+            "e_limits": (a, b),
+            "i_limits": (c, d),
+            "r_e_density": r_e_density,
+            "r_i_density": r_i_density,
+            "g": g,
+            "saved_frames": saved_frames,
+            "verbose": verbose,
+            "plot": plot,
+            "show_plot": show_plot,
+        }
         for (a, b), (c, d) in itertools.product(limit_sets, limit_sets)
     ]
 
-    return [job.result() for job in submitted]
+    return run_balanced_comparison_sweep(
+        comparison_kwargs,
+        max_workers=max_workers,
+    )
 
 def test_run_balanced_limit_sweep_2000um():
     test_run_balanced_limit_sweep_1000um(L=to_SI(2000 * um), t_max=to_SI(2 * second))

@@ -12,6 +12,8 @@ needs its own stepping function rather than a change to the existing one.
 """
 
 from dataclasses import dataclass
+import os
+import threading
 from typing import Optional, Tuple
 
 import numpy as np
@@ -141,8 +143,11 @@ def crank_nicolson_balanced(t_span, V0, A, p: ConicalNumericalCableParameters,
 
         if step % save_every == 0:
             iteration = step // save_every
-            if verbose:
-                print(f"[CN-balanced {iteration}/{num_save}] step {step}/{num_steps}")
+            if verbose and iteration % 1000 == 0:
+                print(
+                    f"[CN-balanced pid={os.getpid()} thread={threading.get_ident()} "
+                    f"{iteration}/{num_save}] step {step}/{num_steps}"
+                )
             times[iteration] = t
             sol[iteration] = V
 

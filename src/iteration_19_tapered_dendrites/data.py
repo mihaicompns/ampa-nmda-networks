@@ -119,6 +119,10 @@ class NumericalCableParameters:
         """
         return np.full_like(np.asarray(x, dtype=float), self.r0)
 
+    @property
+    def r_at_0(self):
+        return self.r0
+
     def lambd(self):
         return math.sqrt(self.r0 * self.rm / (2 * self.ra))
 
@@ -176,6 +180,10 @@ class CableParameters:
     def lambd(self):
         lambda_sq = self.r0 * self.rm / (2 * self.ra)
         return np.sqrt(lambda_sq)
+
+    @property
+    def r_at_0(self):
+        return self.r0
 
     def R_lambda(self): # Ohm
         return self.rm / (2 * np.pi * self.r0 * self.lambd())

@@ -378,7 +378,7 @@ class ConicalCableParameters:
         if self.r_at_L is None and self.r_at_0 is not None:
             object.__setattr__(
                 self,
-                "rL",
+                "r_at_L",
                 self.r_at_0
             )
 
@@ -798,6 +798,10 @@ class ConicalCableParameters:
 
         Values must be supplied with Brian2 units.
         """
+        if "r0" in changes:
+            changes["r_at_0"] = changes.pop("r0")
+        if "rL" in changes:
+            changes["r_at_L"] = changes.pop("rL")
 
         return replace(
             self,
@@ -850,8 +854,14 @@ class ConicalCableParameters:
             elif key == "r_at_0":
                 converted[key] = value * meter
 
+            elif key == "r0":
+                converted["r_at_0"] = value * meter
+
             elif key == "r_at_L":
                 converted[key] = value * meter
+
+            elif key == "rL":
+                converted["r_at_L"] = value * meter
 
             elif key == "I_e":
                 converted[key] = value * ampere

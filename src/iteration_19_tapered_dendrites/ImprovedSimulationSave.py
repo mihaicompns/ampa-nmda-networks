@@ -315,6 +315,204 @@ def _generate_uniform_events(
     return excitatory_events, inhibitory_events
 
 
+def _default_desired_positions(p) -> list[float]:
+    return [
+        float(0.2 * p.L / 1e-6),
+        float(0.5 * p.L / 1e-6),
+        float(0.8 * p.L / 1e-6),
+    ]
+
+
+def _geometry_metadata(p, geometry_type: str) -> dict:
+    geometry = {
+        "cable_length_um": float(p.L / 1e-6),
+        "spatial_points": int(len(p.x)),
+        "spatial_range_um": [float(p.x[0] / 1e-6), float(p.x[-1] / 1e-6)],
+        "dx_um": float(p.dx / 1e-6),
+    }
+    if geometry_type == "tapered_cone":
+        geometry.update({
+            "r_at_0_um": float(p.r_at_0 / 1e-6),
+            "r_at_L_um": float(p.r_at_L / 1e-6),
+        })
+    else:
+        geometry["r0_um"] = float(p.r0 / 1e-6)
+    return geometry
+
+
+def _output_statistics(excitatory_events: np.ndarray, inhibitory_events: np.ndarray, V_s: np.ndarray) -> dict:
+    return {
+        "total_events": int(excitatory_events.shape[1] + inhibitory_events.shape[1]),
+        "excitatory_events": int(excitatory_events.shape[1]),
+        "inhibitory_events": int(inhibitory_events.shape[1]),
+        "voltage_min_mV": float(np.min(V_s) * 1000.0),
+        "voltage_max_mV": float(np.max(V_s) * 1000.0),
+        "voltage_mean_mV": float(np.mean(V_s) * 1000.0),
+        "voltage_std_mV": float(np.std(V_s) * 1000.0),
+        "voltage_range_mV": float((np.max(V_s) - np.min(V_s)) * 1000.0),
+    }
+
+
+def _prepare_balanced_save_folders(save_dir: Path):
+    inputs_dir = save_dir / "inputs"
+    outputs_dir = save_dir / "outputs"
+    graphs_dir = save_dir / "graphs"
+    metadata_dir = save_dir / "metadata"
+    statistics_dir = save_dir / "statistics"
+    for directory in (inputs_dir, outputs_dir, graphs_dir, metadata_dir, statistics_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+    return inputs_dir, outputs_dir, graphs_dir, metadata_dir, statistics_dir
+
+
+def _save_balanced_simulation_result(
+        p,
+        t_max: float,
+        output_root: Path,
+        simulation_label: str,
+        times: np.ndarray,
+        V_s: np.ndarray,
+        excitatory_events: np.ndarray,
+        inhibitory_events: np.ndarray,
+        e_limits: tuple[float, float],
+        i_limits: tuple[float, float],
+        r_e_density,
+        r_i_density,
+        g: Optional[float],
+        experiment_metadata: Optional[BalancedSimulationMetadata],
+        include_metadata_in_save_dir: bool,
+        seed: Optional[int],
+        plot: bool,
+        show_plot: bool,
+        verbose: bool,
+        desired_positions: Optional[list[float]],
+        simulator_name: str,
+        geometry_type: str) -> SavedBalancedConicalSimulation:
+    simulation_metadata = _simulation_metadata(
+        simulation_label=simulation_label,
+        t_max=t_max,
+        e_limits=e_limits,
+        i_limits=i_limits,
+        r_e_density=r_e_density,
+        r_i_density=r_i_density,
+        g=g,
+        seed=seed,
+        dt=p.dt,
+        spatial_points=len(p.x),
+        experiment_metadata=experiment_metadata,
+    )
+    save_label = simulation_metadata.save_label()
+    save_dir_name = save_label if include_metadata_in_save_dir else _safe_label(simulation_label)
+    save_dir = Path(output_root) / save_dir_name
+
+    inputs_dir, outputs_dir, graphs_dir, metadata_dir, statistics_dir = _prepare_balanced_save_folders(save_dir)
+    inputs_file = inputs_dir / "inputs.npz"
+    outputs_file = outputs_dir / "outputs.npz"
+    metadata_file = metadata_dir / "metadata.json"
+    statistics_file = statistics_dir / "simulation_stats.json"
+    graph_file = graphs_dir / "simulation_graph.png" if plot else None
+
+    if desired_positions is None:
+        desired_positions = _default_desired_positions(p)
+
+    if plot:
+        plot_crank_nicolson_unitless_closed_tapered_cone_balance(
+            times=times,
+            V_s=V_s,
+            p=p,
+            excitatory_events=excitatory_events,
+            inhibitory_events=inhibitory_events,
+            simulation_label=simulation_label,
+            desired_positions=desired_positions,
+            save=True,
+            graph_save_name="simulation_graph",
+            graph_out_dir=graphs_dir,
+            show_plot=show_plot,
+            verbose=verbose,
+        )
+
+    np.savez_compressed(
+        inputs_file,
+        excitatory_events=excitatory_events,
+        inhibitory_events=inhibitory_events,
+    )
+    np.savez_compressed(
+        outputs_file,
+        times=times,
+        voltage=V_s,
+        x=p.x,
+    )
+
+    statistics = _output_statistics(excitatory_events, inhibitory_events, V_s)
+    metadata = {
+        "simulation_info": {
+            "label": simulation_label,
+            "save_label": save_label,
+            "deterministic": True,
+            "simulator": simulator_name,
+            "geometry_type": geometry_type,
+        },
+        "geometry": _geometry_metadata(p, geometry_type),
+        "electrical_properties": {
+            "tau_ms": float(p.tau * 1000.0),
+            "dt_ms": float(p.dt * 1000.0),
+            "t_max_ms": float(t_max * 1000.0),
+            "I_e_pA": float(p.I_e / 1e-12),
+            "I_i_pA": float(p.I_i / 1e-12),
+            "g": None if g is None else float(g),
+        },
+        "input_info": {
+            "seed": seed,
+            "e_limits_m": [float(e_limits[0]), float(e_limits[1])],
+            "i_limits_m": [float(i_limits[0]), float(i_limits[1])],
+            "r_e_density_hz_per_um": _rate_density_hz_per_um(simulation_metadata.r_e_density),
+            "r_i_density_hz_per_um": _rate_density_hz_per_um(simulation_metadata.r_i_density),
+            "total_events": statistics["total_events"],
+            "excitatory_events": statistics["excitatory_events"],
+            "inhibitory_events": statistics["inhibitory_events"],
+            "excitatory_spike_train": _events_as_list(excitatory_events),
+            "inhibitory_spike_train": _events_as_list(inhibitory_events),
+        },
+        "brunel_parameters": {
+            "gamma": simulation_metadata.gamma,
+            "g": simulation_metadata.g,
+            "base_rate_hz_per_um": None
+            if simulation_metadata.base_rate is None
+            else _rate_density_hz_per_um(simulation_metadata.base_rate),
+            "base_I_e_strength": None
+            if simulation_metadata.base_I_e_strength is None
+            else _as_float(simulation_metadata.base_I_e_strength),
+        },
+        "files": {
+            "inputs": str(inputs_file.relative_to(save_dir)),
+            "outputs": str(outputs_file.relative_to(save_dir)),
+            "metadata": str(metadata_file.relative_to(save_dir)),
+            "statistics": str(statistics_file.relative_to(save_dir)),
+            "graphs": str(graphs_dir.relative_to(save_dir)),
+            "graph": None if graph_file is None else str(graph_file.relative_to(save_dir)),
+        },
+        "output_statistics": statistics,
+    }
+
+    metadata_file.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    statistics_file.write_text(json.dumps(statistics, indent=2), encoding="utf-8")
+
+    return SavedBalancedConicalSimulation(
+        save_dir=save_dir,
+        inputs_file=inputs_file,
+        outputs_file=outputs_file,
+        metadata_file=metadata_file,
+        statistics_file=statistics_file,
+        graphs_dir=graphs_dir,
+        graph_file=graph_file,
+        times=times,
+        V_s=V_s,
+        excitatory_events=excitatory_events,
+        inhibitory_events=inhibitory_events,
+        metadata=metadata,
+        statistics=statistics,
+    )
+
+
 def run_and_save_balanced_conical_simulation(
         p: ConicalNumericalCableParameters,
         t_max,
@@ -369,42 +567,6 @@ def run_and_save_balanced_conical_simulation(
         i_limits=i_limits,
     )
 
-    simulation_metadata = _simulation_metadata(
-        simulation_label=simulation_label,
-        t_max=t_max,
-        e_limits=e_limits,
-        i_limits=i_limits,
-        r_e_density=r_e_density,
-        r_i_density=r_i_density,
-        g=g,
-        seed=seed,
-        dt=p.dt,
-        spatial_points=len(p.x),
-        experiment_metadata=experiment_metadata,
-    )
-    save_label = simulation_metadata.save_label()
-    save_dir_name = save_label if include_metadata_in_save_dir else _safe_label(simulation_label)
-    save_dir = Path(output_root) / save_dir_name
-    inputs_dir = save_dir / "inputs"
-    outputs_dir = save_dir / "outputs"
-    graphs_dir = save_dir / "graphs"
-    metadata_dir = save_dir / "metadata"
-    statistics_dir = save_dir / "statistics"
-    for directory in (inputs_dir, outputs_dir, graphs_dir, metadata_dir, statistics_dir):
-        directory.mkdir(parents=True, exist_ok=True)
-
-    inputs_file = inputs_dir / "inputs.npz"
-    outputs_file = outputs_dir / "outputs.npz"
-    metadata_file = metadata_dir / "metadata.json"
-    statistics_file = statistics_dir / "simulation_stats.json"
-    graph_file = graphs_dir / "simulation_graph.png" if plot else None
-    if desired_positions is None:
-        desired_positions = [
-            float(0.2 * p.L / 1e-6),
-            float(0.5 * p.L / 1e-6),
-            float(0.8 * p.L / 1e-6),
-        ]
-
     times, V_s = simulate_crank_nicolson_unitless_closed_tapered_cone_balance_with_param(
         p=p,
         excitatory_events=excitatory_events,
@@ -414,119 +576,29 @@ def run_and_save_balanced_conical_simulation(
         verbose=verbose,
     )
 
-    if plot:
-        plot_crank_nicolson_unitless_closed_tapered_cone_balance(
-            times=times,
-            V_s=V_s,
-            p=p,
-            excitatory_events=excitatory_events,
-            inhibitory_events=inhibitory_events,
-            simulation_label=simulation_label,
-            desired_positions=desired_positions,
-            save=True,
-            graph_save_name="simulation_graph",
-            graph_out_dir=graphs_dir,
-            show_plot=show_plot,
-            verbose=verbose,
-        )
-
-    np.savez_compressed(
-        inputs_file,
-        excitatory_events=excitatory_events,
-        inhibitory_events=inhibitory_events,
-    )
-    np.savez_compressed(
-        outputs_file,
-        times=times,
-        voltage=V_s,
-        x=p.x,
-    )
-
-    statistics = {
-        "total_events": int(excitatory_events.shape[1] + inhibitory_events.shape[1]),
-        "excitatory_events": int(excitatory_events.shape[1]),
-        "inhibitory_events": int(inhibitory_events.shape[1]),
-        "voltage_min_mV": float(np.min(V_s) * 1000.0),
-        "voltage_max_mV": float(np.max(V_s) * 1000.0),
-        "voltage_mean_mV": float(np.mean(V_s) * 1000.0),
-        "voltage_std_mV": float(np.std(V_s) * 1000.0),
-        "voltage_range_mV": float((np.max(V_s) - np.min(V_s)) * 1000.0),
-    }
-
-    metadata = {
-        "simulation_info": {
-            "label": simulation_label,
-            "save_label": save_label,
-            "deterministic": True,
-            "simulator": "simulate_crank_nicolson_unitless_closed_tapered_cone_balance_with_param",
-            "geometry_type": "tapered_cone",
-        },
-        "geometry": {
-            "cable_length_um": float(p.L / 1e-6),
-            "spatial_points": int(len(p.x)),
-            "spatial_range_um": [float(p.x[0] / 1e-6), float(p.x[-1] / 1e-6)],
-            "dx_um": float(p.dx / 1e-6),
-            "r_at_0_um": float(p.r_at_0 / 1e-6),
-            "r_at_L_um": float(p.r_at_L / 1e-6),
-        },
-        "electrical_properties": {
-            "tau_ms": float(p.tau * 1000.0),
-            "dt_ms": float(p.dt * 1000.0),
-            "t_max_ms": float(t_max * 1000.0),
-            "I_e_pA": float(p.I_e / 1e-12),
-            "I_i_pA": float(p.I_i / 1e-12),
-            "g": None if g is None else float(g),
-        },
-        "input_info": {
-            "seed": seed,
-            "e_limits_m": None if e_limits is None else [float(e_limits[0]), float(e_limits[1])],
-            "i_limits_m": None if i_limits is None else [float(i_limits[0]), float(i_limits[1])],
-            "r_e_density_hz_per_um": _rate_density_hz_per_um(simulation_metadata.r_e_density),
-            "r_i_density_hz_per_um": _rate_density_hz_per_um(simulation_metadata.r_i_density),
-            "total_events": statistics["total_events"],
-            "excitatory_events": statistics["excitatory_events"],
-            "inhibitory_events": statistics["inhibitory_events"],
-            "excitatory_spike_train": _events_as_list(excitatory_events),
-            "inhibitory_spike_train": _events_as_list(inhibitory_events),
-        },
-        "brunel_parameters": {
-            "gamma": simulation_metadata.gamma,
-            "g": simulation_metadata.g,
-            "base_rate_hz_per_um": None
-            if simulation_metadata.base_rate is None
-            else _rate_density_hz_per_um(simulation_metadata.base_rate),
-            "base_I_e_strength": None
-            if simulation_metadata.base_I_e_strength is None
-            else _as_float(simulation_metadata.base_I_e_strength),
-        },
-        "files": {
-            "inputs": str(inputs_file.relative_to(save_dir)),
-            "outputs": str(outputs_file.relative_to(save_dir)),
-            "metadata": str(metadata_file.relative_to(save_dir)),
-            "statistics": str(statistics_file.relative_to(save_dir)),
-            "graphs": str(graphs_dir.relative_to(save_dir)),
-            "graph": None if graph_file is None else str(graph_file.relative_to(save_dir)),
-        },
-        "output_statistics": statistics,
-    }
-
-    metadata_file.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-    statistics_file.write_text(json.dumps(statistics, indent=2), encoding="utf-8")
-
-    return SavedBalancedConicalSimulation(
-        save_dir=save_dir,
-        inputs_file=inputs_file,
-        outputs_file=outputs_file,
-        metadata_file=metadata_file,
-        statistics_file=statistics_file,
-        graphs_dir=graphs_dir,
-        graph_file=graph_file,
+    return _save_balanced_simulation_result(
+        p=p,
+        t_max=t_max,
+        output_root=output_root,
+        simulation_label=simulation_label,
         times=times,
         V_s=V_s,
         excitatory_events=excitatory_events,
         inhibitory_events=inhibitory_events,
-        metadata=metadata,
-        statistics=statistics,
+        e_limits=e_limits,
+        i_limits=i_limits,
+        r_e_density=r_e_density,
+        r_i_density=r_i_density,
+        g=g,
+        experiment_metadata=experiment_metadata,
+        include_metadata_in_save_dir=include_metadata_in_save_dir,
+        seed=seed,
+        plot=plot,
+        show_plot=show_plot,
+        verbose=verbose,
+        desired_positions=desired_positions,
+        simulator_name="simulate_crank_nicolson_unitless_closed_tapered_cone_balance_with_param",
+        geometry_type="tapered_cone",
     )
 
 
@@ -564,43 +636,6 @@ def run_and_save_balanced_cylindrical_simulation(
         i_limits=i_limits,
     )
 
-    simulation_metadata = _simulation_metadata(
-        simulation_label=simulation_label,
-        t_max=t_max,
-        e_limits=e_limits,
-        i_limits=i_limits,
-        r_e_density=r_e_density,
-        r_i_density=r_i_density,
-        g=g,
-        seed=seed,
-        dt=p.dt,
-        spatial_points=len(p.x),
-        experiment_metadata=experiment_metadata,
-    )
-    save_label = simulation_metadata.save_label()
-    save_dir_name = save_label if include_metadata_in_save_dir else _safe_label(simulation_label)
-    save_dir = Path(output_root) / save_dir_name
-    inputs_dir = save_dir / "inputs"
-    outputs_dir = save_dir / "outputs"
-    graphs_dir = save_dir / "graphs"
-    metadata_dir = save_dir / "metadata"
-    statistics_dir = save_dir / "statistics"
-    for directory in (inputs_dir, outputs_dir, graphs_dir, metadata_dir, statistics_dir):
-        directory.mkdir(parents=True, exist_ok=True)
-
-    inputs_file = inputs_dir / "inputs.npz"
-    outputs_file = outputs_dir / "outputs.npz"
-    metadata_file = metadata_dir / "metadata.json"
-    statistics_file = statistics_dir / "simulation_stats.json"
-    graph_file = graphs_dir / "simulation_graph.png" if plot else None
-
-    if desired_positions is None:
-        desired_positions = [
-            float(0.2 * p.L / 1e-6),
-            float(0.5 * p.L / 1e-6),
-            float(0.8 * p.L / 1e-6),
-        ]
-
     times, V_s = simulate_crank_nicolson_unitless_closed_cylinder_balance_with_param(
         p=p,
         excitatory_events=excitatory_events,
@@ -610,118 +645,29 @@ def run_and_save_balanced_cylindrical_simulation(
         verbose=verbose,
     )
 
-    if plot:
-        plot_crank_nicolson_unitless_closed_tapered_cone_balance(
-            times=times,
-            V_s=V_s,
-            p=p,
-            excitatory_events=excitatory_events,
-            inhibitory_events=inhibitory_events,
-            simulation_label=simulation_label,
-            desired_positions=desired_positions,
-            save=True,
-            graph_save_name="simulation_graph",
-            graph_out_dir=graphs_dir,
-            show_plot=show_plot,
-            verbose=verbose,
-        )
-
-    np.savez_compressed(
-        inputs_file,
-        excitatory_events=excitatory_events,
-        inhibitory_events=inhibitory_events,
-    )
-    np.savez_compressed(
-        outputs_file,
-        times=times,
-        voltage=V_s,
-        x=p.x,
-    )
-
-    statistics = {
-        "total_events": int(excitatory_events.shape[1] + inhibitory_events.shape[1]),
-        "excitatory_events": int(excitatory_events.shape[1]),
-        "inhibitory_events": int(inhibitory_events.shape[1]),
-        "voltage_min_mV": float(np.min(V_s) * 1000.0),
-        "voltage_max_mV": float(np.max(V_s) * 1000.0),
-        "voltage_mean_mV": float(np.mean(V_s) * 1000.0),
-        "voltage_std_mV": float(np.std(V_s) * 1000.0),
-        "voltage_range_mV": float((np.max(V_s) - np.min(V_s)) * 1000.0),
-    }
-
-    metadata = {
-        "simulation_info": {
-            "label": simulation_label,
-            "save_label": save_label,
-            "deterministic": True,
-            "simulator": "simulate_crank_nicolson_unitless_closed_cylinder_balance_with_param",
-            "geometry_type": "uniform_cylinder",
-        },
-        "geometry": {
-            "cable_length_um": float(p.L / 1e-6),
-            "spatial_points": int(len(p.x)),
-            "spatial_range_um": [float(p.x[0] / 1e-6), float(p.x[-1] / 1e-6)],
-            "dx_um": float(p.dx / 1e-6),
-            "r0_um": float(p.r0 / 1e-6),
-        },
-        "electrical_properties": {
-            "tau_ms": float(p.tau * 1000.0),
-            "dt_ms": float(p.dt * 1000.0),
-            "t_max_ms": float(t_max * 1000.0),
-            "I_e_pA": float(p.I_e / 1e-12),
-            "I_i_pA": float(p.I_i / 1e-12),
-            "g": None if g is None else float(g),
-        },
-        "input_info": {
-            "seed": seed,
-            "e_limits_m": None if e_limits is None else [float(e_limits[0]), float(e_limits[1])],
-            "i_limits_m": None if i_limits is None else [float(i_limits[0]), float(i_limits[1])],
-            "r_e_density_hz_per_um": _rate_density_hz_per_um(simulation_metadata.r_e_density),
-            "r_i_density_hz_per_um": _rate_density_hz_per_um(simulation_metadata.r_i_density),
-            "total_events": statistics["total_events"],
-            "excitatory_events": statistics["excitatory_events"],
-            "inhibitory_events": statistics["inhibitory_events"],
-            "excitatory_spike_train": _events_as_list(excitatory_events),
-            "inhibitory_spike_train": _events_as_list(inhibitory_events),
-        },
-        "brunel_parameters": {
-            "gamma": simulation_metadata.gamma,
-            "g": simulation_metadata.g,
-            "base_rate_hz_per_um": None
-            if simulation_metadata.base_rate is None
-            else _rate_density_hz_per_um(simulation_metadata.base_rate),
-            "base_I_e_strength": None
-            if simulation_metadata.base_I_e_strength is None
-            else _as_float(simulation_metadata.base_I_e_strength),
-        },
-        "files": {
-            "inputs": str(inputs_file.relative_to(save_dir)),
-            "outputs": str(outputs_file.relative_to(save_dir)),
-            "metadata": str(metadata_file.relative_to(save_dir)),
-            "statistics": str(statistics_file.relative_to(save_dir)),
-            "graphs": str(graphs_dir.relative_to(save_dir)),
-            "graph": None if graph_file is None else str(graph_file.relative_to(save_dir)),
-        },
-        "output_statistics": statistics,
-    }
-
-    metadata_file.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-    statistics_file.write_text(json.dumps(statistics, indent=2), encoding="utf-8")
-
-    return SavedBalancedConicalSimulation(
-        save_dir=save_dir,
-        inputs_file=inputs_file,
-        outputs_file=outputs_file,
-        metadata_file=metadata_file,
-        statistics_file=statistics_file,
-        graphs_dir=graphs_dir,
-        graph_file=graph_file,
+    return _save_balanced_simulation_result(
+        p=p,
+        t_max=t_max,
+        output_root=output_root,
+        simulation_label=simulation_label,
         times=times,
         V_s=V_s,
         excitatory_events=excitatory_events,
         inhibitory_events=inhibitory_events,
-        metadata=metadata,
-        statistics=statistics,
+        e_limits=e_limits,
+        i_limits=i_limits,
+        r_e_density=r_e_density,
+        r_i_density=r_i_density,
+        g=g,
+        experiment_metadata=experiment_metadata,
+        include_metadata_in_save_dir=include_metadata_in_save_dir,
+        seed=seed,
+        plot=plot,
+        show_plot=show_plot,
+        verbose=verbose,
+        desired_positions=desired_positions,
+        simulator_name="simulate_crank_nicolson_unitless_closed_cylinder_balance_with_param",
+        geometry_type="uniform_cylinder",
     )
 
 
@@ -739,7 +685,7 @@ def sim_cylindrical(**kwargs):
     return run_and_save_balanced_cylindrical_simulation(**kwargs)
 
 
-def submit_balanced_conical_with_cylindrical_comparison(
+def _balanced_comparison_commands(
         conical_p: ConicalNumericalCableParameters,
         t_max,
         output_root: Path,
@@ -756,15 +702,7 @@ def submit_balanced_conical_with_cylindrical_comparison(
         saved_frames: int = 1200,
         verbose: bool = False,
         plot: bool = True,
-        show_plot: bool = True,
-        max_workers: int = 2) -> BalancedComparisonFutures:
-    """
-    Submit cone and cylinder simulations and return immediately with futures.
-
-    Results are saved as siblings:
-      output_root/simulation_label/conical
-      output_root/simulation_label/cylindrical
-    """
+        show_plot: bool = True):
     t_max = to_SI(t_max)
     if excitatory_events is None or inhibitory_events is None:
         if e_limits is None or i_limits is None:
@@ -806,53 +744,91 @@ def submit_balanced_conical_with_cylindrical_comparison(
     base_dir = Path(output_root) / save_label
     cylindrical_p = conical_p.to_numerical_cylindrical_params()
 
+    common_kwargs = {
+        "t_max": t_max,
+        "output_root": base_dir,
+        "excitatory_events": excitatory_events,
+        "inhibitory_events": inhibitory_events,
+        "e_limits": e_limits,
+        "i_limits": i_limits,
+        "r_e_density": r_e_density,
+        "r_i_density": r_i_density,
+        "g": g,
+        "experiment_metadata": simulation_metadata,
+        "include_metadata_in_save_dir": False,
+        "seed": seed,
+        "saved_frames": saved_frames,
+        "verbose": verbose,
+        "plot": plot,
+        "show_plot": show_plot,
+    }
+    return base_dir, [
+        ("conical", sim_conical, {
+            **common_kwargs,
+            "p": conical_p,
+            "simulation_label": "conical",
+        }),
+        ("cylindrical", sim_cylindrical, {
+            **common_kwargs,
+            "p": cylindrical_p,
+            "simulation_label": "cylindrical",
+        }),
+    ]
+
+
+def submit_balanced_conical_with_cylindrical_comparison(
+        conical_p: ConicalNumericalCableParameters,
+        t_max,
+        output_root: Path,
+        simulation_label: str,
+        e_limits: Optional[tuple[float, float]] = None,
+        i_limits: Optional[tuple[float, float]] = None,
+        r_e_density=0.4 * Hz / um,
+        r_i_density=0.1 * Hz / um,
+        g: Optional[float] = None,
+        experiment_metadata: Optional[BalancedSimulationMetadata] = None,
+        excitatory_events: Optional[np.ndarray] = None,
+        inhibitory_events: Optional[np.ndarray] = None,
+        seed: Optional[int] = None,
+        saved_frames: int = 1200,
+        verbose: bool = False,
+        plot: bool = True,
+        show_plot: bool = True,
+        max_workers: int = 2) -> BalancedComparisonFutures:
+    """
+    Submit cone and cylinder simulations and return immediately with futures.
+
+    Results are saved as siblings:
+      output_root/simulation_label/conical
+      output_root/simulation_label/cylindrical
+    """
+    base_dir, commands = _balanced_comparison_commands(
+        conical_p=conical_p,
+        t_max=t_max,
+        output_root=output_root,
+        simulation_label=simulation_label,
+        e_limits=e_limits,
+        i_limits=i_limits,
+        r_e_density=r_e_density,
+        r_i_density=r_i_density,
+        g=g,
+        experiment_metadata=experiment_metadata,
+        excitatory_events=excitatory_events,
+        inhibitory_events=inhibitory_events,
+        seed=seed,
+        saved_frames=saved_frames,
+        verbose=verbose,
+        plot=plot,
+        show_plot=show_plot,
+    )
+
     executor = ProcessPoolExecutor(
         max_workers=max_workers,
         mp_context=multiprocessing.get_context("spawn"),
     )
     futures = {
-        executor.submit(
-            sim_conical,
-            p=conical_p,
-            t_max=t_max,
-            output_root=base_dir,
-            simulation_label="conical",
-            excitatory_events=excitatory_events,
-            inhibitory_events=inhibitory_events,
-            e_limits=e_limits,
-            i_limits=i_limits,
-            r_e_density=r_e_density,
-            r_i_density=r_i_density,
-            g=g,
-            experiment_metadata=simulation_metadata,
-            include_metadata_in_save_dir=False,
-            seed=seed,
-            saved_frames=saved_frames,
-            verbose=verbose,
-            plot=plot,
-            show_plot=show_plot,
-        ): "conical",
-        executor.submit(
-            sim_cylindrical,
-            p=cylindrical_p,
-            t_max=t_max,
-            output_root=base_dir,
-            simulation_label="cylindrical",
-            excitatory_events=excitatory_events,
-            inhibitory_events=inhibitory_events,
-            e_limits=e_limits,
-            i_limits=i_limits,
-            r_e_density=r_e_density,
-            r_i_density=r_i_density,
-            g=g,
-            experiment_metadata=simulation_metadata,
-            include_metadata_in_save_dir=False,
-            seed=seed,
-            saved_frames=saved_frames,
-            verbose=verbose,
-            plot=plot,
-            show_plot=show_plot,
-        ): "cylindrical",
+        executor.submit(function, **kwargs): geometry
+        for geometry, function, kwargs in commands
     }
 
     return BalancedComparisonFutures(
@@ -873,3 +849,55 @@ def run_and_save_balanced_conical_with_cylindrical_comparison(
     """
     submitted = submit_balanced_conical_with_cylindrical_comparison(*args, **kwargs)
     return submitted.result()
+
+
+def run_balanced_comparison_sweep(
+        comparison_kwargs,
+        max_workers: int = 2):
+    """
+    Run many conical/cylindrical comparisons through one bounded process pool.
+
+    Only `max_workers` simulation commands are submitted at a time. Once one
+    command finishes, the next command is submitted, so the executor queue does
+    not accumulate every heavy simulation payload up front.
+    """
+    comparison_commands = []
+    comparison_results = []
+    for comparison_index, kwargs in enumerate(comparison_kwargs):
+        kwargs = dict(kwargs)
+        kwargs.pop("max_workers", None)
+        save_dir, commands = _balanced_comparison_commands(**kwargs)
+        comparison_results.append({"save_dir": save_dir})
+        for geometry, function, command_kwargs in commands:
+            comparison_commands.append((comparison_index, geometry, function, command_kwargs))
+
+    if not comparison_commands:
+        return []
+
+    max_workers = max(1, int(max_workers))
+    command_iter = iter(comparison_commands)
+    active_futures = {}
+
+    def submit_next(executor):
+        try:
+            comparison_index, geometry, function, command_kwargs = next(command_iter)
+        except StopIteration:
+            return False
+        future = executor.submit(function, **command_kwargs)
+        active_futures[future] = (comparison_index, geometry)
+        return True
+
+    with ProcessPoolExecutor(
+            max_workers=max_workers,
+            mp_context=multiprocessing.get_context("spawn")) as executor:
+        for _ in range(min(max_workers, len(comparison_commands))):
+            submit_next(executor)
+
+        while active_futures:
+            for future in as_completed(tuple(active_futures)):
+                comparison_index, geometry = active_futures.pop(future)
+                comparison_results[comparison_index][geometry] = future.result()
+                submit_next(executor)
+                break
+
+    return comparison_results
