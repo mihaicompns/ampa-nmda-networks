@@ -103,7 +103,7 @@ def refined_membrane_properties(x, lambda_val):
     return effective_tau, effective_phi, base_chi
 ```
 
-## Testing Simulation Functions: Short Tests vs. Long-Running Scripts
+## Testing Simulation Functions: Short Tests vs. Long-Running PyCharm Test Cases
 
 Full research simulations in this project run for minutes to hours. That's incompatible with a
 test suite that should run on every change, so every simulation-driving method gets **two**
@@ -111,11 +111,18 @@ callers instead of one:
 
 - A **test** (`test_*.py`, pytest-discovered) that calls the method with a *short* time budget —
   `to_SI(0.001 * second)` or less — and checks the result against a numerically frozen answer.
-- A **script** (`*Scripts.py`, `*TestCases.py`, `*Tests.py`, or anything under `scripts/`) that
-  calls the *same* method with the real, long research time budget. Scripts are for a human to
-  run by hand (`python3 file.py`); their filenames don't match pytest's `test_*.py`/`*_test.py`
-  discovery pattern, so they never slow down or block the automated suite, no matter how long
-  they run.
+- A **manual long-running test case** in a non-pytest-discovered file (`*Scripts.py`,
+  `*TestCases.py`, `*Tests.py`, or anything under `scripts/`) that calls the *same* method with
+  the real research time budget. These files intentionally avoid pytest's default
+  `test_*.py`/`*_test.py` discovery pattern, so they never slow down or block the automated suite.
+  Inside them, prefer `unittest.TestCase` methods over `if __name__ == "__main__"` scripts:
+  PyCharm shows a green run button for each independent method, and each method can be launched
+  by hand as its own long simulation.
+
+Long-running PyCharm test cases should still make a tiny assertion, usually that an output file
+exists, has nonzero size, or that a coarse scientific condition holds. They are not meant to be
+fast unit tests; the assertion is there so the runnable reports success/failure cleanly after a
+human launches it.
 
 ### What "input data" means for a simulation
 
@@ -151,8 +158,8 @@ For each simulation-driving method (Crank-Nicolson step, forward-Euler step, eve
    plotting is for the one-time visual check while authoring it, not for every pytest run.
 
 This gives every simulation method a fast, deterministic pytest test that catches regressions
-immediately, while the real long research runs stay in scripts — run by hand, on demand, without
-slowing down `pytest`.
+immediately, while the real long research runs stay in PyCharm-runnable test case methods — run
+by hand, on demand, without slowing down `pytest`.
 
 ## Benefits of TDD in Neuroscience Modeling
 

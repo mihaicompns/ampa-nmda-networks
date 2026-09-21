@@ -2,10 +2,6 @@ import unittest
 import numpy as np
 from brian2 import ms, Hz, nS
 
-from iteration_16.model import ConductanceDiffusionSimulationConfig, WANG_MODEL_FOR_FULL_NMDA_INPUT
-from iteration_16.simulation import WangSimulation, plot
-
-
 class ConductanceDiffusionTestCase(unittest.TestCase):
 
     def test_default_config_runs_with_zero_spikes(self):

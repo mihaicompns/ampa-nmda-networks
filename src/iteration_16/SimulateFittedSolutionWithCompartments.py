@@ -8,18 +8,16 @@ from joblib import Parallel, delayed
 
 from brian2 import BrianLogger
 
-from iteration_16.Preliminaries import compute_nmda_dv
+from src.Plotting import prepare_bigger_fonts, show_plots_non_blocking
+from src.iteration_16.Preliminaries import compute_nmda_dv
+from src.iteration_16.model import ConductanceDiffusionSimulationConfig, MeanfieldScaling, config_with_weak_synapses, \
+    config_with_medium_synapses, wang_config_external_ampa_synapses, config_with_intermediate_synapses
+from src.iteration_16.nmda_compartment_model import NMDASimulationWangCompartments
+from src.iteration_16.simpy import load_solutions
 
 BrianLogger.log_level_error()
 BrianLogger.suppress_name("brian2.codegen")
 BrianLogger.log_level_error()
-
-from Plotting import show_plots_non_blocking, prepare_bigger_fonts
-from iteration_16.Simulate_K_NMDA_Compartments import plot_k_sweep_results
-from iteration_16.model import config_with_weak_synapses, ConductanceDiffusionSimulationConfig, MeanfieldScaling, \
-    wang_config_external_ampa_synapses, config_with_medium_synapses, config_with_intermediate_synapses
-from iteration_16.nmda_compartment_model import NMDASimulationWangCompartments
-from iteration_16.simpy import load_solutions
 
 def gen_plot_title_multi_compartment_run(config: ConductanceDiffusionSimulationConfig):
 
@@ -31,7 +29,7 @@ def gen_plot_title(config: ConductanceDiffusionSimulationConfig):
     return (f"{config.label} with {config.k_comp} NMDA compartments: ""\n"r"$w_{\mathrm{AMPA}} = $" f"{config.w_ampa / nS: .2f} (nS), "r"$w_{\mathrm{GABA}} = $" f"{config.w_gaba / nS: .2f} (nS) "
             r"$N_E=$"f"{config.N_E}, "r"$N_I=$"f"{config.N_I}, "r"$r_e=$"f"{config.r_e / Hz:.2f} Hz, "r"$r_i=$"f"{config.r_i / Hz:.2f} Hz, "r"$\gamma=$"f"{config.g_i0() / config.g_e0():.2f}")
 
-import pandas as pd
+#import pandas as pd
 
 def save_comparison_run(df: pd.DataFrame, config: ConductanceDiffusionSimulationConfig):
     output_dir = Path("results")
@@ -63,6 +61,8 @@ class CompartmentSimulationsWithFittedSolution(unittest.TestCase):
             print(gr, gamma)
             object_under_test = cfg.with_fitted_solution(gr, gamma)
             self.assertAlmostEqual(gamma, object_under_test.g_i0() / object_under_test.g_e0())
+
+            print(object_under_test.r_e)
 
     def test_for_albert(self):
         cfg = config_with_weak_synapses.with_property(N_E=10, simulation_time = 2 * second, seed=200, r_e=5 * Hz, r_i=5 * Hz)

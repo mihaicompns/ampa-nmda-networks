@@ -6,10 +6,9 @@ from sympy import Reals
 from sympy.physics.control.control_plots import plt
 from sympy.physics.quantum.identitysearch import np
 
-from Plotting import prepare_bigger_fonts, show_plots_non_blocking
-from iteration_12_transfer_function_of_lif_neurons.config import DiffusionLIFConfig
-from iteration_16.model import config_with_weak_synapses, chapter1Results, config_with_medium_synapses, \
-    wang_config_recurrent_synapses, ConductanceDiffusionSimulationConfig, wang_config_external_ampa_synapses
+from src.Plotting import prepare_bigger_fonts, show_plots_non_blocking
+from src.iteration_16.model import chapter1Results, ConductanceDiffusionSimulationConfig, config_with_weak_synapses, \
+    config_with_medium_synapses, wang_config_recurrent_synapses, wang_config_external_ampa_synapses
 
 
 def bind_config_to_sympy_values(cfg):
@@ -28,7 +27,7 @@ def bind_config_to_sympy_values(cfg):
     }
     return values
 
-solutions_file_name = "solutions.txt"
+solutions_file_name = "solutions/solutions.txt"
 polynomial_file_name = "polynomial.txt"
 
 def load_solutions(config: ConductanceDiffusionSimulationConfig, file_name: str = solutions_file_name, load_negative_values = False):

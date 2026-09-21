@@ -7,7 +7,7 @@ from brian2 import ufarad, siemens, mV, ms, Hz, nS, nsiemens, mmole, kHz, psieme
 from brian2.units.allunits import pampere
 from loguru import logger
 
-from iteration_8_compute_mean_steady_state.equations import sigmoid_v
+from src.iteration_8_compute_mean_steady_state.equations import sigmoid_v
 
 
 class SynapticParams:

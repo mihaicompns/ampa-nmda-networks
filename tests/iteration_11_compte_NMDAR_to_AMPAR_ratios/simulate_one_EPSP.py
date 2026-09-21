@@ -3,9 +3,8 @@ from brian2 import plt, mpl, StateMonitor, mV, start_scope, defaultclock, mmole,
     second, devices as brian2devices, seed, Synapses, \
     ms, SpikeGeneratorGroup
 
-from iteration_7_one_compartment_step_input.Configuration_with_Up_Down_States import Experiment
-from iteration_7_one_compartment_step_input.one_compartment_with_up_down import \
-    SimulationResults
+from src.iteration_7_one_compartment_step_input.Configuration_with_Up_Down_States import Experiment
+from src.iteration_7_one_compartment_step_input.one_compartment_with_up_down import SimulationResults
 
 plt.rcParams.update(mpl.rcParamsDefault)
 plt.rcParams['text.usetex'] = True

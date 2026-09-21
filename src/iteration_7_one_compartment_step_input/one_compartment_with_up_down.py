@@ -9,9 +9,8 @@ from matplotlib import gridspec
 from matplotlib.gridspec import SubplotSpec
 from mpl_toolkits.axes_grid1.mpl_axes import Axes
 
-from Plotting import show_plots_non_blocking, prepare_bigger_fonts
-from iteration_7_one_compartment_step_input.Configuration_with_Up_Down_States import Experiment
-from utils import ExtendedDict
+from src.Plotting import Experiment, prepare_bigger_fonts, show_plots_non_blocking
+from src.utils import ExtendedDict
 
 plt.rcParams.update(mpl.rcParamsDefault)
 plt.rcParams['text.usetex'] = True

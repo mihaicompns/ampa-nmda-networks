@@ -14,16 +14,12 @@ g_A = 2.0
 g_N = 2.0
 g_G = 2.0
 
-E_L = -70.0
+E_L = -65.0
 E_A = 0.0
 E_N = 0.0
-E_G = -80.0
+E_G = -70.0
 
-Mg = 1.4  # [Mg2+], matching Bifurcation_NMDA_FCN
-
-g_VD_slope = 0.0007
-g_VD_voltage_offset = 100.0
-tau_g_VD = 0.05
+Mg = 1.0  # [Mg2+]
 
 alpha_N = 1.0
 G_glu = 0.01
@@ -56,29 +52,11 @@ def sigma_Mg(v):
 # ============================================================
 # Effective NMDA conductance
 #
-# Bifurcation_NMDA_FCN computes:
-#
-#   g_conpost = 1 + g_VDpost
-#   g_VDinfpost = 0.0007 * (v + 100)
-#   dg_VDpost/dt = (g_VDinfpost - g_VDpost) / 0.05
-#
-# At fixed point:
-#
-#   g_VDpost* = g_VDinfpost(v*) = 0.0007 * (v* + 100)
-#
-# Therefore:
-#
-#   g_N_eff(v*) = g_N * (1 + 0.0007 * (v* + 100))
+# For now assumed constant.
+# Replace this function if g_N_eff depends on v.
 # ============================================================
 
-def g_VD_inf(v):
-    return g_VD_slope * (v + g_VD_voltage_offset)
-
-
-def g_N_eff(v, g_N_fixed=g_N, include_g_VD=True):
-    if include_g_VD:
-        return g_N_fixed * (1.0 + g_VD_inf(v))
-
+def g_N_eff(v, g_N_fixed=g_N):
     return g_N_fixed * np.ones_like(v)
 
 
@@ -98,7 +76,7 @@ def g_N_eff(v, g_N_fixed=g_N, include_g_VD=True):
 #       / (g_N_eff * sigma_Mg(v) * (v-E_N))
 # ============================================================
 
-def mN_v_nullcline(v, mA, mG, g_N_fixed=g_N, include_g_VD=False):
+def mN_v_nullcline(v, mA, mG, g_N_fixed=g_N):
 
     numerator = (
         g_L * (v - E_L)
@@ -107,7 +85,7 @@ def mN_v_nullcline(v, mA, mG, g_N_fixed=g_N, include_g_VD=False):
     )
 
     denominator = (
-        g_N_eff(v, g_N_fixed=g_N_fixed, include_g_VD=include_g_VD)
+        g_N_eff(v, g_N_fixed=g_N_fixed)
         * sigma_Mg(v)
         * (v - E_N)
     )
@@ -115,26 +93,13 @@ def mN_v_nullcline(v, mA, mG, g_N_fixed=g_N, include_g_VD=False):
     return -numerator / denominator
 
 
-def v_nullcline_residual(
-        v,
-        mA,
-        mG,
-        mN,
-        use_Mg_block=True,
-        g_N_fixed=g_N,
-        include_g_VD=False
-):
+def v_nullcline_residual(v, mA, mG, mN, use_Mg_block=True, g_N_fixed=g_N):
     Mg_block = sigma_Mg(v) if use_Mg_block else 1.0
 
     return (
         g_L * (v - E_L)
         + g_A * mA * (v - E_A)
-        + (
-            g_N_eff(v, g_N_fixed=g_N_fixed, include_g_VD=include_g_VD)
-            * mN
-            * Mg_block
-            * (v - E_N)
-        )
+        + g_N_eff(v, g_N_fixed=g_N_fixed) * mN * Mg_block * (v - E_N)
         + g_G * mG * (v - E_G)
     )
 
@@ -150,7 +115,7 @@ def mN_fixed_point(beta_N, alpha_N_fixed=alpha_N, G_glu_fixed=G_glu):
 # Grid
 # ============================================================
 
-v_values = np.linspace(-100, 54, 600)
+v_values = np.linspace(-90, -10, 300)
 mA_values = np.linspace(0.0, 1.0, 150)
 
 V, MA = np.meshgrid(v_values, mA_values)
@@ -254,8 +219,7 @@ def find_v_roots_for_mN(
         mA_fixed=0.0,
         mG_fixed=0.0,
         use_Mg_block=True,
-        g_N_fixed=g_N,
-        include_g_VD=False
+        g_N_fixed=g_N
 ):
     residuals = v_nullcline_residual(
         v_values,
@@ -263,8 +227,7 @@ def find_v_roots_for_mN(
         mG=mG_fixed,
         mN=mN_fixed,
         use_Mg_block=use_Mg_block,
-        g_N_fixed=g_N_fixed,
-        include_g_VD=include_g_VD
+        g_N_fixed=g_N_fixed
     )
     roots = []
 
@@ -287,8 +250,7 @@ def find_v_roots_for_mN(
                     mG=mG_fixed,
                     mN=mN_fixed,
                     use_Mg_block=use_Mg_block,
-                    g_N_fixed=g_N_fixed,
-                    include_g_VD=include_g_VD
+                    g_N_fixed=g_N_fixed
                 ),
                 bracket=[v_left, v_right],
                 method="brentq"
@@ -306,8 +268,7 @@ def voltage_branch_for_mN_axis(
         mA_fixed=0.0,
         mG_fixed=0.0,
         use_Mg_block=True,
-        g_N_fixed=g_N,
-        include_g_VD=False
+        g_N_fixed=g_N
 ):
     roots_by_mN = [
         find_v_roots_for_mN(
@@ -315,8 +276,7 @@ def voltage_branch_for_mN_axis(
             mA_fixed=mA_fixed,
             mG_fixed=mG_fixed,
             use_Mg_block=use_Mg_block,
-            g_N_fixed=g_N_fixed,
-            include_g_VD=include_g_VD
+            g_N_fixed=g_N_fixed
         )
         for mN_fixed in mN_axis
     ]
@@ -377,7 +337,7 @@ def plot_v_vs_mN_ignoring_AMPA_GABA(show_plot=True):
     return fig, ax
 
 
-def plot_v_vs_mN_for_g_NMDA_strengths(show_plot=True, include_g_VD=False):
+def plot_v_vs_mN_for_g_NMDA_strengths(show_plot=True):
     mN_axis = np.linspace(0.0, 1.0, 300)
     fig, ax = plt.subplots(figsize=(8, 5))
     all_branch_values = []
@@ -389,8 +349,7 @@ def plot_v_vs_mN_for_g_NMDA_strengths(show_plot=True, include_g_VD=False):
             mA_fixed=0.0,
             mG_fixed=0.0,
             use_Mg_block=True,
-            g_N_fixed=g_N_fixed,
-            include_g_VD=include_g_VD
+            g_N_fixed=g_N_fixed
         )
 
         for root_index, branch in enumerate(branches):
@@ -414,17 +373,9 @@ def plot_v_vs_mN_for_g_NMDA_strengths(show_plot=True, include_g_VD=False):
         y_max = max(all_branch_values)
         y_margin = 0.08 * (y_max - y_min)
         ax.set_ylim(y_min - y_margin, y_max + y_margin)
-    if include_g_VD:
-        title = (
-            r"$v(m_N)$ nullcline with Mg sigmoid and "
-            r"$g_{VD}^*(v)$, varying $g_{NMDA}/g_L$"
-        )
-    else:
-        title = (
-            r"$v(m_N)$ nullcline with Mg sigmoid, "
-            r"constant $g_{NMDA}$, varying $g_{NMDA}/g_L$"
-        )
-    ax.set_title(title)
+    ax.set_title(
+        r"$v(m_N)$ nullcline with Mg sigmoid, varying $g_{NMDA}/g_L$"
+    )
     ax.legend()
 
     plt.tight_layout()
@@ -432,13 +383,6 @@ def plot_v_vs_mN_for_g_NMDA_strengths(show_plot=True, include_g_VD=False):
         plt.show()
 
     return fig, ax
-
-
-def plot_v_vs_mN_for_g_NMDA_strengths_with_g_eff(show_plot=True):
-    return plot_v_vs_mN_for_g_NMDA_strengths(
-        show_plot=show_plot,
-        include_g_VD=True
-    )
 
 
 def plot_v_vs_mN_for_beta_N_values(show_plot=True):
@@ -475,7 +419,7 @@ def plot_v_vs_mN_for_beta_N_values(show_plot=True):
     return fig, ax
 
 
-def plot_beta_N_vs_v_fixed_points(show_plot=True, include_g_VD=False):
+def plot_beta_N_vs_v_fixed_points(show_plot=True):
     beta_N_axis = np.linspace(
         min(beta_N_values),
         max(beta_N_values),
@@ -497,8 +441,7 @@ def plot_beta_N_vs_v_fixed_points(show_plot=True, include_g_VD=False):
                     mN_star,
                     mA_fixed=0.0,
                     mG_fixed=0.0,
-                    use_Mg_block=use_Mg_block,
-                    include_g_VD=include_g_VD
+                    use_Mg_block=use_Mg_block
                 )
             )
 
@@ -523,8 +466,7 @@ def plot_beta_N_vs_v_fixed_points(show_plot=True, include_g_VD=False):
             mN_star,
             mA_fixed=0.0,
             mG_fixed=0.0,
-            use_Mg_block=True,
-            include_g_VD=include_g_VD
+            use_Mg_block=True
         )
         if roots:
             ax.scatter(
@@ -546,17 +488,9 @@ def plot_beta_N_vs_v_fixed_points(show_plot=True, include_g_VD=False):
 
     ax.set_xlabel(r"$\beta_N$ [$\mathrm{ms}^{-1}$]")
     ax.set_ylabel(r"$v^*$ [mV]")
-    if include_g_VD:
-        title = (
-            r"Fixed voltage root as $\beta_N$ varies, "
-            r"with $g_{VD}^*(v)$, $m_A=0$, $m_G=0$"
-        )
-    else:
-        title = (
-            r"Fixed voltage root as $\beta_N$ varies, "
-            r"constant $g_{NMDA}$, $m_A=0$, $m_G=0$"
-        )
-    ax.set_title(title)
+    ax.set_title(
+        r"Fixed voltage root as $\beta_N$ varies, $m_A=0$, $m_G=0$"
+    )
     ax.legend()
 
     plt.tight_layout()
@@ -564,13 +498,6 @@ def plot_beta_N_vs_v_fixed_points(show_plot=True, include_g_VD=False):
         plt.show()
 
     return fig, ax
-
-
-def plot_beta_N_vs_v_fixed_points_with_g_eff(show_plot=True):
-    return plot_beta_N_vs_v_fixed_points(
-        show_plot=show_plot,
-        include_g_VD=True
-    )
 
 
 class TestNonlinearDynamicsNMDAScripts(unittest.TestCase):
@@ -583,14 +510,8 @@ class TestNonlinearDynamicsNMDAScripts(unittest.TestCase):
     def test_plot_v_vs_mN_for_g_NMDA_strengths(self):
         plot_v_vs_mN_for_g_NMDA_strengths()
 
-    def test_plot_v_vs_mN_for_g_NMDA_strengths_with_g_eff(self):
-        plot_v_vs_mN_for_g_NMDA_strengths_with_g_eff()
-
     def test_plot_beta_N_vs_voltage(self):
         plot_beta_N_vs_v_fixed_points()
-
-    def test_plot_beta_N_vs_voltage_with_g_eff(self):
-        plot_beta_N_vs_v_fixed_points_with_g_eff()
 
     def test_plot_each_mG_nullcline(self):
         mG_values = [
