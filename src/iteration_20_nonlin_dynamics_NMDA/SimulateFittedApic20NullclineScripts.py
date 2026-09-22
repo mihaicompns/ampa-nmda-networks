@@ -1142,6 +1142,7 @@ def launch_fitted_apic20_csv_snapshot_slider(
         metadata=metadata,
         trace=trace,
         parameters=parameters,
+        output_dir=output_dir,
         show_plot=show_plot,
     )
 
@@ -1175,9 +1176,11 @@ def create_fitted_apic20_csv_snapshot_slider_figure(
         valfmt="%.3f ms",
     )
     radio_ax = fig.add_axes([0.01, 0.16, 0.10, 0.68])
+    protocol_labels = [_interactive_protocol_menu_label(name) for name in protocols]
+    protocol_by_label = dict(zip(protocol_labels, protocols))
     radio = RadioButtons(
         radio_ax,
-        [_interactive_protocol_menu_label(name) for name in protocols],
+        protocol_labels,
         active=protocols.index(metadata["protocol_name"]),
     )
     radio_ax.set_title("CSV protocol", fontsize=9)
@@ -1282,7 +1285,7 @@ def create_fitted_apic20_csv_snapshot_slider_figure(
         update_from_slider(float(t_ms[initial_index]))
 
     def select_protocol(label):
-        load_protocol(protocols[radio.labels.index(label)])
+        load_protocol(protocol_by_label[label])
 
     slider.on_changed(update_from_slider)
     radio.on_clicked(select_protocol)
