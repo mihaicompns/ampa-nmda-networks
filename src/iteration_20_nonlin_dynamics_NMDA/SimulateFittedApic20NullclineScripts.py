@@ -5,6 +5,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
+from matplotlib.widgets import Slider
 import numpy as np
 
 from src.Plotting import show_plots_non_blocking
@@ -23,6 +24,18 @@ FITTED_NULLCLINE_OUTPUT_DIR = DEFAULT_OUTPUT_DIR / "fitted_apic20_nullcline"
 FITTED_NULLCLINE_SPIKE_SNAPSHOT_OUTPUT_DIR = (
     DEFAULT_OUTPUT_DIR / "fitted_apic20_nullcline_spike_snapshots"
 )
+FITTED_NULLCLINE_SATURATING_OUTPUT_DIR = (
+    DEFAULT_OUTPUT_DIR / "fitted_apic20_nullcline_with_s_saturation"
+)
+FITTED_NULLCLINE_SATURATING_TWO_SPIKE_OUTPUT_DIR = (
+    DEFAULT_OUTPUT_DIR / "fitted_apic20_nullcline_with_s_saturation_two_spike"
+)
+FITTED_NULLCLINE_INTERACTIVE_CSV_DIR = (
+    DEFAULT_OUTPUT_DIR / "fitted_apic20_interactive_csv"
+)
+INTERACTIVE_CSV_PROTOCOL_NAME = "current_balance_three_spike"
+INTERACTIVE_T_MIN_MS = 40.0
+INTERACTIVE_T_MAX_MS = 200.0
 
 FIRST_SPIKE_TIME_MS = 50.0
 SPIKE_DT_MS = 20.0
@@ -52,15 +65,68 @@ def fitted_apic20_spike_times_ms():
     return FIRST_SPIKE_TIME_MS + SPIKE_DT_MS * np.arange(N_SPIKES)
 
 
+def fitted_apic20_spike_times_up_to_ms(max_time_ms):
+    return np.asarray(
+        [
+            spike_time_ms
+            for spike_time_ms in fitted_apic20_spike_times_ms()
+            if spike_time_ms <= float(max_time_ms)
+        ],
+        dtype=float,
+    )
+
+
 def fitted_apic20_spike_snapshot_times_up_to_ms(max_time_ms=89.0):
     return {
         f"spike_{spike_index}_t{spike_time_ms:g}ms": float(spike_time_ms)
-        for spike_index, spike_time_ms in enumerate(fitted_apic20_spike_times_ms(), start=1)
+        for spike_index, spike_time_ms in enumerate(
+            fitted_apic20_spike_times_up_to_ms(max_time_ms),
+            start=1,
+        )
         if spike_time_ms <= float(max_time_ms)
     }
 
 
-def read_fit_and_simulate_fitted_apic20_reference():
+def fitted_apic20_snapshot_times_up_to_ms(max_time_ms=89.0):
+    snapshot_times = {
+        label: time_ms
+        for label, time_ms in {
+            "t67ms": 67.0,
+            "t89ms": 89.0,
+            "t97ms": 97.0,
+            "t98ms": 98.0,
+            "t140ms": 140.0,
+        }.items()
+        if time_ms <= float(max_time_ms)
+    }
+    snapshot_times.update(fitted_apic20_spike_snapshot_times_up_to_ms(max_time_ms))
+    return dict(sorted(snapshot_times.items(), key=lambda item: item[1]))
+
+
+def peak_voltage_snapshot_times_between_spikes_ms(trace, t_max_ms):
+    t_ms = np.asarray(trace["t_ms"], dtype=float)
+    v_mV = np.asarray(trace["v_local_mV"], dtype=float)
+    spike_times_ms = np.asarray(trace["spike_times_ms"], dtype=float)
+    peak_times = {}
+    for spike_index, spike_time_ms in enumerate(spike_times_ms, start=1):
+        interval_end_ms = (
+            spike_times_ms[spike_index]
+            if spike_index < len(spike_times_ms)
+            else float(t_max_ms)
+        )
+        if spike_index < len(spike_times_ms):
+            interval_mask = (t_ms >= spike_time_ms) & (t_ms < interval_end_ms)
+        else:
+            interval_mask = (t_ms >= spike_time_ms) & (t_ms <= interval_end_ms)
+        interval_indexes = np.flatnonzero(interval_mask)
+        if len(interval_indexes) == 0:
+            continue
+        peak_index = interval_indexes[int(np.argmax(v_mV[interval_indexes]))]
+        peak_times[f"vmax_after_spike_{spike_index}"] = float(t_ms[peak_index])
+    return peak_times
+
+
+def read_fit_and_simulate_fitted_apic20_reference(spike_times_ms=None, with_s_saturation=False):
     (
         reference,
         _target_s,
@@ -95,7 +161,12 @@ def read_fit_and_simulate_fitted_apic20_reference():
         e_leak_mV=fit_result.e_leak_mV,
         e_excitatory_mV=fit_result.e_excitatory_mV,
     )
-    local_trace = simulate_fitted_apic20_trace(reference.t_ms, parameters)
+    local_trace = simulate_fitted_apic20_trace(
+        reference.t_ms,
+        parameters,
+        spike_times_ms=spike_times_ms,
+        with_s_saturation=with_s_saturation,
+    )
     local_trace["reference_v_local_mV"] = reference.v_local_mV
     local_trace["passive_reference_fit_v_mV"] = fitted_v_mV
     local_trace["fit_capacitance_and_g_leak_v_mV"] = (
@@ -104,10 +175,15 @@ def read_fit_and_simulate_fitted_apic20_reference():
     return reference, parameters, local_trace
 
 
-def simulate_fitted_apic20_trace(t_ms, parameters):
-    state = simulate_nmda_x_s_state(
+def simulate_fitted_apic20_trace(t_ms, parameters, spike_times_ms=None, with_s_saturation=False):
+    if spike_times_ms is None:
+        spike_times_ms = fitted_apic20_spike_times_ms()
+    state_function = (
+        simulate_saturating_nmda_x_s_state if with_s_saturation else simulate_nmda_x_s_state
+    )
+    state = state_function(
         t_ms=t_ms,
-        spike_times_ms=fitted_apic20_spike_times_ms(),
+        spike_times_ms=spike_times_ms,
         spike_weight=parameters.spike_weight,
         tau_rise_ms=parameters.tau_rise_ms,
         tau_decay_ms=parameters.tau_decay_ms,
@@ -127,10 +203,21 @@ def simulate_fitted_apic20_trace(t_ms, parameters):
     g_nmda_nS = parameters.g_nmda_max_nS * sigma * state["s"]
     empirical_dvdt = np.gradient(v_mV, t_ms)
     empirical_d2vdt2 = np.gradient(empirical_dvdt, t_ms)
-    individual_s = simulate_individual_s_kernels(t_ms, parameters)
+    individual_s = simulate_individual_s_kernels(
+        t_ms,
+        parameters,
+        spike_times_ms,
+        with_s_saturation=with_s_saturation,
+    )
     return {
-        "condition": "fitted single compartment",
-        "n_spikes": N_SPIKES,
+        "condition": (
+            "fitted single compartment saturating s"
+            if with_s_saturation
+            else "fitted single compartment"
+        ),
+        "n_spikes": len(spike_times_ms),
+        "spike_times_ms": np.asarray(spike_times_ms, dtype=float),
+        "with_s_saturation": bool(with_s_saturation),
         "t_ms": np.asarray(t_ms, dtype=float),
         "v_local_mV": v_mV,
         "x": state["x"],
@@ -143,10 +230,67 @@ def simulate_fitted_apic20_trace(t_ms, parameters):
     }
 
 
-def simulate_individual_s_kernels(t_ms, parameters):
+def simulate_saturating_nmda_x_s_state(
+    t_ms,
+    spike_times_ms,
+    spike_weight=1.0,
+    tau_rise_ms=2.0,
+    tau_decay_ms=100.0,
+    alpha_per_ms=0.5,
+):
+    t_ms = np.asarray(t_ms, dtype=float)
+    dt_ms = float(np.median(np.diff(t_ms)))
+    spike_steps = _spike_steps_for_fitted_trace(t_ms, spike_times_ms)
+
+    x = np.zeros_like(t_ms, dtype=float)
+    s = np.zeros_like(t_ms, dtype=float)
+    x_current = 0.0
+    s_current = 0.0
+
+    for step in range(len(t_ms)):
+        if step in spike_steps:
+            x_current += spike_steps[step] * float(spike_weight)
+
+        x[step] = x_current
+        s[step] = s_current
+
+        if step == len(t_ms) - 1:
+            break
+
+        dx = dt_ms * (-x_current / float(tau_rise_ms))
+        ds = dt_ms * (
+            -s_current / float(tau_decay_ms)
+            + float(alpha_per_ms) * x_current * (1.0 - s_current)
+        )
+        x_current += dx
+        s_current += ds
+
+    return {"x": x, "s": s}
+
+
+def _spike_steps_for_fitted_trace(t_ms, spike_times_ms):
+    spike_steps = {}
+    for spike_time_ms in spike_times_ms:
+        step = int(np.searchsorted(t_ms, float(spike_time_ms), side="left"))
+        if 0 <= step < len(t_ms):
+            spike_steps[step] = spike_steps.get(step, 0) + 1
+    return spike_steps
+
+
+def simulate_individual_s_kernels(
+    t_ms,
+    parameters,
+    spike_times_ms=None,
+    with_s_saturation=False,
+):
+    if spike_times_ms is None:
+        spike_times_ms = fitted_apic20_spike_times_ms()
+    state_function = (
+        simulate_saturating_nmda_x_s_state if with_s_saturation else simulate_nmda_x_s_state
+    )
     kernels = []
-    for spike_time_ms in fitted_apic20_spike_times_ms():
-        state = simulate_nmda_x_s_state(
+    for spike_time_ms in spike_times_ms:
+        state = state_function(
             t_ms=t_ms,
             spike_times_ms=[spike_time_ms],
             spike_weight=parameters.spike_weight,
@@ -273,8 +417,13 @@ def generate_fitted_apic20_moving_nullcline_animation(
     t_max_ms=T_MAX_MS,
     fps=FPS,
     show_plot=True,
+    spike_times_ms=None,
+    with_s_saturation=False,
 ):
-    reference, parameters, trace = read_fit_and_simulate_fitted_apic20_reference()
+    reference, parameters, trace = read_fit_and_simulate_fitted_apic20_reference(
+        spike_times_ms=spike_times_ms,
+        with_s_saturation=with_s_saturation,
+    )
     output_gif_path = Path(output_gif_path)
     output_gif_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -438,8 +587,13 @@ def generate_fitted_apic20_moving_nullcline_snapshot(
     t_min_ms=T_MIN_MS,
     t_max_ms=T_MAX_MS,
     show_plot=True,
+    spike_times_ms=None,
+    with_s_saturation=False,
 ):
-    reference, parameters, trace = read_fit_and_simulate_fitted_apic20_reference()
+    reference, parameters, trace = read_fit_and_simulate_fitted_apic20_reference(
+        spike_times_ms=spike_times_ms,
+        with_s_saturation=with_s_saturation,
+    )
     output_png_path = Path(output_png_path)
     output_png_path.parent.mkdir(parents=True, exist_ok=True)
     t_ms = trace["t_ms"]
@@ -568,13 +722,25 @@ def snapshot_metrics(reference, trace, parameters, index, v_values_mV, nullcline
     }
 
 
-def generate_fitted_apic20_standard_protocol_outputs(show_plot=True):
-    reference, _parameters, _trace = read_fit_and_simulate_fitted_apic20_reference()
-    output_dir = FITTED_NULLCLINE_OUTPUT_DIR
+def generate_fitted_apic20_standard_protocol_outputs(
+    show_plot=True,
+    with_s_saturation=False,
+    output_dir=None,
+):
+    reference, _parameters, trace = read_fit_and_simulate_fitted_apic20_reference(
+        with_s_saturation=with_s_saturation,
+    )
+    if output_dir is None:
+        output_dir = (
+            FITTED_NULLCLINE_SATURATING_OUTPUT_DIR
+            if with_s_saturation
+            else FITTED_NULLCLINE_OUTPUT_DIR
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     gif_path = generate_fitted_apic20_moving_nullcline_animation(
         output_gif_path=output_dir / "fitted_apic20_moving_nullcline.gif",
         show_plot=show_plot,
+        with_s_saturation=with_s_saturation,
     )
     snapshot_times = {
         "t67ms": 67.0,
@@ -584,12 +750,14 @@ def generate_fitted_apic20_standard_protocol_outputs(show_plot=True):
         "t140ms": 140.0,
         "max_reference_empirical_dvdt": max_reference_empirical_dvdt_time_ms(reference),
     }
+    snapshot_times.update(peak_voltage_snapshot_times_between_spikes_ms(trace, T_MAX_MS))
     snapshots = {}
     for label, snapshot_time_ms in snapshot_times.items():
         snapshots[label] = generate_fitted_apic20_moving_nullcline_snapshot(
             snapshot_time_ms=snapshot_time_ms,
             output_png_path=output_dir / f"fitted_apic20_moving_nullcline_{label}.png",
             show_plot=show_plot,
+            with_s_saturation=with_s_saturation,
         )
     metrics_path = output_dir / "fitted_apic20_moving_nullcline_protocol.json"
     metrics_path.write_text(
@@ -606,29 +774,537 @@ def generate_fitted_apic20_standard_protocol_outputs(show_plot=True):
     return gif_path, snapshots, metrics_path
 
 
-def generate_fitted_apic20_spike_time_snapshot_protocol_outputs(show_plot=True):
-    output_dir = FITTED_NULLCLINE_SPIKE_SNAPSHOT_OUTPUT_DIR
+def generate_fitted_apic20_two_spike_protocol_outputs(
+    show_plot=True,
+    with_s_saturation=False,
+    output_dir=None,
+):
+    if output_dir is None:
+        output_dir = (
+            FITTED_NULLCLINE_SATURATING_TWO_SPIKE_OUTPUT_DIR
+            if with_s_saturation
+            else FITTED_NULLCLINE_SPIKE_SNAPSHOT_OUTPUT_DIR
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
-    snapshot_times = fitted_apic20_spike_snapshot_times_up_to_ms(max_time_ms=89.0)
+    spike_times_ms = fitted_apic20_spike_times_up_to_ms(max_time_ms=89.0)
+    _reference, _parameters, trace = read_fit_and_simulate_fitted_apic20_reference(
+        spike_times_ms=spike_times_ms,
+        with_s_saturation=with_s_saturation,
+    )
+    gif_path = generate_fitted_apic20_moving_nullcline_animation(
+        output_gif_path=output_dir / "fitted_apic20_two_spike_moving_nullcline.gif",
+        t_max_ms=89.0,
+        show_plot=show_plot,
+        spike_times_ms=spike_times_ms,
+        with_s_saturation=with_s_saturation,
+    )
+    snapshot_times = fitted_apic20_snapshot_times_up_to_ms(max_time_ms=89.0)
+    snapshot_times.update(peak_voltage_snapshot_times_between_spikes_ms(trace, 89.0))
     snapshots = {}
     for label, snapshot_time_ms in snapshot_times.items():
         snapshots[label] = generate_fitted_apic20_moving_nullcline_snapshot(
             snapshot_time_ms=snapshot_time_ms,
-            output_png_path=output_dir / f"fitted_apic20_moving_nullcline_{label}.png",
+            output_png_path=output_dir / f"fitted_apic20_two_spike_moving_nullcline_{label}.png",
             show_plot=show_plot,
+            spike_times_ms=spike_times_ms,
+            with_s_saturation=with_s_saturation,
         )
     metrics_path = output_dir / "fitted_apic20_spike_time_snapshot_protocol.json"
     metrics_path.write_text(
         json.dumps(
             {
+                "gif_path": str(gif_path),
                 "snapshots": snapshots,
                 "snapshot_times_ms": snapshot_times,
+                "spike_times_ms": spike_times_ms.tolist(),
             },
             indent=2,
             sort_keys=True,
         )
     )
-    return snapshots, metrics_path
+    return gif_path, snapshots, metrics_path
+
+
+def fitted_apic20_interactive_protocol_specs():
+    return {
+        "standard_three_spike": {
+            "label": "standard nullcline, 3 spikes",
+            "spike_times_ms": fitted_apic20_spike_times_ms(),
+            "t_min_ms": INTERACTIVE_T_MIN_MS,
+            "t_max_ms": INTERACTIVE_T_MAX_MS,
+            "with_s_saturation": False,
+        },
+        "current_balance_three_spike": {
+            "label": "current-balance nullcline, 3 spikes",
+            "spike_times_ms": fitted_apic20_spike_times_ms(),
+            "t_min_ms": INTERACTIVE_T_MIN_MS,
+            "t_max_ms": INTERACTIVE_T_MAX_MS,
+            "with_s_saturation": False,
+        },
+        "standard_two_spike": {
+            "label": "standard nullcline, 2 spikes",
+            "spike_times_ms": fitted_apic20_spike_times_up_to_ms(89.0),
+            "t_min_ms": T_MIN_MS,
+            "t_max_ms": 89.0,
+            "with_s_saturation": False,
+        },
+        "current_balance_two_spike": {
+            "label": "current-balance nullcline, 2 spikes",
+            "spike_times_ms": fitted_apic20_spike_times_up_to_ms(89.0),
+            "t_min_ms": T_MIN_MS,
+            "t_max_ms": 89.0,
+            "with_s_saturation": False,
+        },
+        "standard_three_spike_with_s_saturation": {
+            "label": "standard nullcline with s saturation, 3 spikes",
+            "spike_times_ms": fitted_apic20_spike_times_ms(),
+            "t_min_ms": INTERACTIVE_T_MIN_MS,
+            "t_max_ms": INTERACTIVE_T_MAX_MS,
+            "with_s_saturation": True,
+        },
+        "current_balance_three_spike_with_s_saturation": {
+            "label": "current-balance nullcline with s saturation, 3 spikes",
+            "spike_times_ms": fitted_apic20_spike_times_ms(),
+            "t_min_ms": INTERACTIVE_T_MIN_MS,
+            "t_max_ms": INTERACTIVE_T_MAX_MS,
+            "with_s_saturation": True,
+        },
+        "standard_two_spike_with_s_saturation": {
+            "label": "standard nullcline with s saturation, 2 spikes",
+            "spike_times_ms": fitted_apic20_spike_times_up_to_ms(89.0),
+            "t_min_ms": T_MIN_MS,
+            "t_max_ms": 89.0,
+            "with_s_saturation": True,
+        },
+        "current_balance_two_spike_with_s_saturation": {
+            "label": "current-balance nullcline with s saturation, 2 spikes",
+            "spike_times_ms": fitted_apic20_spike_times_up_to_ms(89.0),
+            "t_min_ms": T_MIN_MS,
+            "t_max_ms": 89.0,
+            "with_s_saturation": True,
+        },
+    }
+
+
+def save_fitted_apic20_protocol_csv_bundle(
+    protocol_name=INTERACTIVE_CSV_PROTOCOL_NAME,
+    output_dir=FITTED_NULLCLINE_INTERACTIVE_CSV_DIR,
+):
+    specs = fitted_apic20_interactive_protocol_specs()
+    if protocol_name not in specs:
+        raise ValueError(f"Unknown protocol {protocol_name!r}; choose one of {sorted(specs)}")
+    spec = specs[protocol_name]
+    output_dir = Path(output_dir) / protocol_name
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    _reference, parameters, trace = read_fit_and_simulate_fitted_apic20_reference(
+        spike_times_ms=spec["spike_times_ms"],
+        with_s_saturation=spec["with_s_saturation"],
+    )
+    trace_path = output_dir / "trace.csv"
+    metadata_path = output_dir / "metadata.json"
+    _save_interactive_trace_csv(trace, trace_path)
+    metadata = {
+        "protocol_name": protocol_name,
+        "label": spec["label"],
+        "t_min_ms": spec["t_min_ms"],
+        "t_max_ms": spec["t_max_ms"],
+        "spike_times_ms": np.asarray(spec["spike_times_ms"], dtype=float).tolist(),
+        "with_s_saturation": bool(spec["with_s_saturation"]),
+        "parameters": asdict(parameters),
+        "trace_csv": str(trace_path),
+    }
+    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True))
+    return trace_path, metadata_path
+
+
+def _save_interactive_trace_csv(trace, path):
+    columns = [
+        ("t_ms", trace["t_ms"]),
+        ("v_local_mV", trace["v_local_mV"]),
+        ("x", trace["x"]),
+        ("s", trace["s"]),
+        ("g_nmda_nS", trace["g_nmda_nS"]),
+        ("sigma", trace["sigma"]),
+        ("empirical_dvdt_mV_per_ms", trace["empirical_dvdt_mV_per_ms"]),
+        ("empirical_d2vdt2_mV_per_ms2", trace["empirical_d2vdt2_mV_per_ms2"]),
+    ]
+    for spike_index, individual_s in enumerate(trace["individual_s"], start=1):
+        columns.append((f"individual_s_{spike_index}", individual_s))
+    header = ",".join(name for name, _values in columns)
+    data = np.column_stack([np.asarray(values, dtype=float) for _name, values in columns])
+    np.savetxt(path, data, delimiter=",", header=header, comments="")
+
+
+def read_fitted_apic20_protocol_csv_bundle(
+    protocol_name=INTERACTIVE_CSV_PROTOCOL_NAME,
+    output_dir=FITTED_NULLCLINE_INTERACTIVE_CSV_DIR,
+):
+    bundle_dir = Path(output_dir) / protocol_name
+    metadata_path = bundle_dir / "metadata.json"
+    trace_path = bundle_dir / "trace.csv"
+    metadata = json.loads(metadata_path.read_text())
+    data = np.genfromtxt(trace_path, delimiter=",", names=True)
+    trace = {name: np.asarray(data[name], dtype=float) for name in data.dtype.names}
+    individual_names = sorted(
+        name for name in trace if name.startswith("individual_s_")
+    )
+    trace["individual_s"] = np.asarray([trace[name] for name in individual_names])
+    trace["spike_times_ms"] = np.asarray(metadata["spike_times_ms"], dtype=float)
+    return metadata, trace
+
+
+def ensure_fitted_apic20_protocol_csv_bundle(
+    protocol_name=INTERACTIVE_CSV_PROTOCOL_NAME,
+    output_dir=FITTED_NULLCLINE_INTERACTIVE_CSV_DIR,
+):
+    bundle_dir = Path(output_dir) / protocol_name
+    trace_path = bundle_dir / "trace.csv"
+    metadata_path = bundle_dir / "metadata.json"
+    if not trace_path.exists() or not metadata_path.exists():
+        return save_fitted_apic20_protocol_csv_bundle(protocol_name, output_dir)
+    specs = fitted_apic20_interactive_protocol_specs()
+    metadata = json.loads(metadata_path.read_text())
+    spec = specs[protocol_name]
+    metadata_is_stale = (
+        not np.isclose(float(metadata.get("t_min_ms", np.nan)), float(spec["t_min_ms"]))
+        or not np.isclose(float(metadata.get("t_max_ms", np.nan)), float(spec["t_max_ms"]))
+        or metadata.get("spike_times_ms") != np.asarray(spec["spike_times_ms"], dtype=float).tolist()
+        or bool(metadata.get("with_s_saturation", False)) != bool(spec["with_s_saturation"])
+    )
+    if metadata_is_stale:
+        return save_fitted_apic20_protocol_csv_bundle(protocol_name, output_dir)
+    return trace_path, metadata_path
+
+
+def ensure_interactive_matplotlib_backend():
+    current_backend = plt.get_backend().lower()
+    if "agg" not in current_backend and "inline" not in current_backend:
+        return plt.get_backend()
+    errors = []
+    for backend in ["QtAgg", "Qt5Agg", "TkAgg"]:
+        try:
+            plt.switch_backend(backend)
+            return plt.get_backend()
+        except Exception as exc:
+            errors.append(f"{backend}: {exc}")
+    raise RuntimeError(
+        "Could not switch Matplotlib to an interactive GUI backend. "
+        "Tried QtAgg, Qt5Agg, and TkAgg. Errors: " + " | ".join(errors)
+    )
+
+
+def launch_fitted_apic20_csv_snapshot_slider(
+    protocol_name=INTERACTIVE_CSV_PROTOCOL_NAME,
+    output_dir=FITTED_NULLCLINE_INTERACTIVE_CSV_DIR,
+    show_plot=True,
+):
+    if show_plot:
+        ensure_interactive_matplotlib_backend()
+    ensure_fitted_apic20_protocol_csv_bundle(protocol_name, output_dir)
+    metadata, trace = read_fitted_apic20_protocol_csv_bundle(protocol_name, output_dir)
+    parameters = FittedApic20NullclineParameters(**metadata["parameters"])
+    return create_fitted_apic20_csv_snapshot_slider_figure(
+        metadata=metadata,
+        trace=trace,
+        parameters=parameters,
+        show_plot=show_plot,
+    )
+
+
+def create_fitted_apic20_csv_snapshot_slider_figure(
+    metadata,
+    trace,
+    parameters,
+    show_plot=True,
+):
+    from src.iteration_20_nonlin_dynamics_NMDA.SimulateFittedApic20CurrentNullclineScripts import (
+        compute_current_balance_nullcline_pA,
+        estimate_current_balance_intersections_mV,
+    )
+
+    t_ms = np.asarray(trace["t_ms"], dtype=float)
+    v_values_mV = np.linspace(-90.0, 20.0, 500)
+    sample_indexes = np.unique(
+        np.linspace(0, len(t_ms) - 1, min(250, len(t_ms)), dtype=int)
+    )
+    sampled_residual_curves = np.asarray(
+        [
+            compute_local_nullcline_dvdt_mV_per_ms(
+                parameters,
+                trace["s"][index],
+                v_values_mV,
+            )
+            for index in sample_indexes
+        ]
+    )
+    sampled_current_curves = [
+        compute_current_balance_nullcline_pA(parameters, trace["s"][index], v_values_mV)
+        for index in sample_indexes
+    ]
+    residual_cache = {}
+    current_cache = {}
+
+    axes = create_current_like_interactive_figure()
+    fig = axes["fig"]
+    configure_interactive_csv_axes(
+        axes,
+        trace,
+        metadata,
+        sampled_residual_curves,
+        sampled_current_curves,
+    )
+    plot_interactive_static_axes(axes, trace)
+
+    active_voltage_line, = axes["voltage_ax"].plot([], [], color="tab:blue", linewidth=2.0)
+    active_g_line, = axes["g_nmda_ax"].plot([], [], color="tab:green", linewidth=2.0)
+    active_s_line, = axes["s_ax"].plot([], [], color="tab:purple", linewidth=2.0)
+    active_dvdt_line, = axes["dvdt_ax"].plot([], [], color="black", linewidth=2.0)
+    active_d2vdt2_line, = axes["d2vdt2_ax"].plot([], [], color="tab:brown", linewidth=2.0)
+    residual_line, = axes["nullcline_ax"].plot([], [], color="tab:orange", linewidth=2.0)
+    nmda_line, = axes["current_nullcline_ax"].plot([], [], color="tab:red", linewidth=2.0)
+    leak_line, = axes["current_nullcline_ax"].plot([], [], color="tab:blue", linewidth=2.0)
+    time_lines = [
+        axes[name].axvline(t_ms[0], color="0.45", linewidth=1.0)
+        for name in ["voltage_ax", "g_nmda_ax", "s_ax", "dvdt_ax", "d2vdt2_ax"]
+    ]
+    residual_v_line = axes["nullcline_ax"].axvline(t_ms[0], color="tab:blue", linewidth=1.0)
+    current_v_line = axes["current_nullcline_ax"].axvline(t_ms[0], color="0.35", linewidth=1.0)
+    voltage_point, = axes["voltage_ax"].plot([], [], "o", color="tab:blue")
+    g_point, = axes["g_nmda_ax"].plot([], [], "o", color="tab:green")
+    s_point, = axes["s_ax"].plot([], [], "o", color="tab:purple")
+    dvdt_point, = axes["dvdt_ax"].plot([], [], "o", color="black")
+    d2vdt2_point, = axes["d2vdt2_ax"].plot([], [], "o", color="tab:brown")
+    residual_point, = axes["nullcline_ax"].plot([], [], "o", color="tab:orange")
+    current_nmda_point, = axes["current_nullcline_ax"].plot([], [], "o", color="tab:red")
+    current_leak_point, = axes["current_nullcline_ax"].plot([], [], "o", color="tab:blue")
+    intersection_dots, = axes["current_nullcline_ax"].plot(
+        [], [], "o", color="black", markerfacecolor="black", markersize=5, linestyle="None"
+    )
+    intersection_crosshairs, = axes["current_nullcline_ax"].plot(
+        [], [], "+", color="white", markersize=9, linestyle="None", markeredgewidth=1.2
+    )
+    title = fig.suptitle("")
+
+    slider_ax = fig.add_axes([0.12, 0.025, 0.76, 0.025])
+    visible_indexes = np.flatnonzero(
+        (t_ms >= float(metadata["t_min_ms"])) & (t_ms <= float(metadata["t_max_ms"]))
+    )
+    initial_index = int(visible_indexes[0]) if len(visible_indexes) else 0
+    dt_ms = float(np.median(np.diff(t_ms))) if len(t_ms) > 1 else 1.0
+    slider = Slider(
+        slider_ax,
+        "t [ms]",
+        float(metadata["t_min_ms"]),
+        float(metadata["t_max_ms"]),
+        valinit=float(t_ms[initial_index]),
+        valstep=dt_ms,
+        valfmt="%.3f ms",
+    )
+
+    artists = {
+        "active_voltage_line": active_voltage_line,
+        "active_g_line": active_g_line,
+        "active_s_line": active_s_line,
+        "active_dvdt_line": active_dvdt_line,
+        "active_d2vdt2_line": active_d2vdt2_line,
+        "residual_line": residual_line,
+        "nmda_line": nmda_line,
+        "leak_line": leak_line,
+        "time_lines": time_lines,
+        "residual_v_line": residual_v_line,
+        "current_v_line": current_v_line,
+        "voltage_point": voltage_point,
+        "g_point": g_point,
+        "s_point": s_point,
+        "dvdt_point": dvdt_point,
+        "d2vdt2_point": d2vdt2_point,
+        "residual_point": residual_point,
+        "current_nmda_point": current_nmda_point,
+        "current_leak_point": current_leak_point,
+        "intersection_dots": intersection_dots,
+        "intersection_crosshairs": intersection_crosshairs,
+        "title": title,
+    }
+
+    def update_from_slider(selected_t_ms):
+        insertion_index = int(np.searchsorted(t_ms, float(selected_t_ms), side="left"))
+        if insertion_index <= 0:
+            index = 0
+        elif insertion_index >= len(t_ms):
+            index = len(t_ms) - 1
+        else:
+            left_index = insertion_index - 1
+            right_index = insertion_index
+            if abs(t_ms[left_index] - selected_t_ms) <= abs(t_ms[right_index] - selected_t_ms):
+                index = left_index
+            else:
+                index = right_index
+        update_interactive_csv_snapshot(
+            index=index,
+            metadata=metadata,
+            trace=trace,
+            parameters=parameters,
+            v_values_mV=v_values_mV,
+            residual_cache=residual_cache,
+            current_cache=current_cache,
+            compute_current_balance_nullcline_pA=compute_current_balance_nullcline_pA,
+            estimate_current_balance_intersections_mV=estimate_current_balance_intersections_mV,
+            artists=artists,
+        )
+        fig.canvas.draw_idle()
+
+    slider.on_changed(update_from_slider)
+    update_from_slider(float(t_ms[initial_index]))
+    fig.subplots_adjust(left=0.06, right=0.98, bottom=0.09, top=0.88, hspace=0.45)
+    if show_plot:
+        plt.show(block=True)
+    return fig, axes, slider
+
+
+def create_current_like_interactive_figure():
+    fig, axes = plt.subplot_mosaic(
+        [
+            ["voltage_ax", "g_nmda_ax", "s_ax"],
+            ["nullcline_ax", "dvdt_ax", "d2vdt2_ax"],
+            ["current_nullcline_ax", "current_nullcline_ax", "current_nullcline_ax"],
+        ],
+        figsize=(14, 11),
+    )
+    axes["fig"] = fig
+    return axes
+
+
+def configure_interactive_csv_axes(axes, trace, metadata, residual_curves, current_curves):
+    t_ms = trace["t_ms"]
+    time_mask = (t_ms >= metadata["t_min_ms"]) & (t_ms <= metadata["t_max_ms"])
+    for name in ["voltage_ax", "g_nmda_ax", "s_ax", "dvdt_ax", "d2vdt2_ax"]:
+        axes[name].set_xlim(metadata["t_min_ms"], metadata["t_max_ms"])
+    axes["nullcline_ax"].set_xlim(-90.0, 20.0)
+    axes["current_nullcline_ax"].set_xlim(-90.0, 20.0)
+    axes["voltage_ax"].set_ylim(
+        float(np.min(trace["v_local_mV"][time_mask])) - 3.0,
+        float(np.max(trace["v_local_mV"][time_mask])) + 3.0,
+    )
+    axes["g_nmda_ax"].set_ylim(0.0, float(np.max(trace["g_nmda_nS"][time_mask])) * 1.1)
+    axes["s_ax"].set_ylim(
+        0.0,
+        float(np.max([np.max(trace["s"][time_mask]), np.max(trace["individual_s"][:, time_mask])])) * 1.1,
+    )
+    axes["dvdt_ax"].set_ylim(derivative_ylim(trace["empirical_dvdt_mV_per_ms"][time_mask]))
+    axes["d2vdt2_ax"].set_ylim(derivative_ylim(trace["empirical_d2vdt2_mV_per_ms2"][time_mask]))
+    axes["nullcline_ax"].set_ylim(derivative_ylim(residual_curves))
+    current_values = np.concatenate(
+        [currents["nmda_pA"] for currents in current_curves]
+        + [currents["leak_balance_pA"] for currents in current_curves]
+    )
+    axes["current_nullcline_ax"].set_ylim(derivative_ylim(current_values))
+    axes["voltage_ax"].set_title(r"$V(t)$")
+    axes["g_nmda_ax"].set_title(r"$g_{\mathrm{NMDA}}(t)$")
+    axes["s_ax"].set_title(r"fitted $s(t)$")
+    axes["nullcline_ax"].set_title(r"$dV/dt(V; s(t))$")
+    axes["dvdt_ax"].set_title(r"simulated $dV/dt$")
+    axes["d2vdt2_ax"].set_title(r"simulated $d^2V/dt^2$")
+    axes["current_nullcline_ax"].set_title(r"$I_{\mathrm{NMDA}}(V,t)=-I_L(V)$")
+    axes["voltage_ax"].set_ylabel("V [mV]")
+    axes["g_nmda_ax"].set_ylabel(r"$g_{\mathrm{NMDA}}$ [nS]")
+    axes["s_ax"].set_ylabel("s")
+    axes["nullcline_ax"].set_ylabel(r"$dV/dt$ [mV/ms]")
+    axes["dvdt_ax"].set_ylabel(r"$dV/dt$ [mV/ms]")
+    axes["d2vdt2_ax"].set_ylabel(r"$d^2V/dt^2$ [mV/ms$^2$]")
+    axes["current_nullcline_ax"].set_ylabel("current [pA]")
+    for name, ax in axes.items():
+        if name == "fig":
+            continue
+        ax.set_xlabel("V [mV]" if "nullcline" in name else "t [ms]")
+    axes["nullcline_ax"].axhline(0.0, color="black", linewidth=1.0)
+    axes["dvdt_ax"].axhline(0.0, color="black", linewidth=1.0)
+    axes["d2vdt2_ax"].axhline(0.0, color="black", linewidth=1.0)
+    axes["current_nullcline_ax"].axhline(0.0, color="0.6", linewidth=1.0)
+
+
+def plot_interactive_static_axes(axes, trace):
+    t_ms = trace["t_ms"]
+    axes["voltage_ax"].plot(t_ms, trace["v_local_mV"], color="0.75", linewidth=1.0)
+    axes["g_nmda_ax"].plot(t_ms, trace["g_nmda_nS"], color="0.75", linewidth=1.0)
+    axes["s_ax"].plot(t_ms, trace["s"], color="0.75", linewidth=1.0)
+    for spike_index, individual_s in enumerate(trace["individual_s"], start=1):
+        axes["s_ax"].plot(t_ms, individual_s, linestyle=":", linewidth=1.0, alpha=0.7)
+    axes["dvdt_ax"].plot(t_ms, trace["empirical_dvdt_mV_per_ms"], color="0.75", linewidth=1.0)
+    axes["d2vdt2_ax"].plot(
+        t_ms,
+        trace["empirical_d2vdt2_mV_per_ms2"],
+        color="0.75",
+        linewidth=1.0,
+    )
+
+
+def update_interactive_csv_snapshot(
+    index,
+    metadata,
+    trace,
+    parameters,
+    v_values_mV,
+    residual_cache,
+    current_cache,
+    compute_current_balance_nullcline_pA,
+    estimate_current_balance_intersections_mV,
+    artists,
+):
+    t_ms = trace["t_ms"]
+    current_t_ms = float(t_ms[index])
+    current_v_mV = float(trace["v_local_mV"][index])
+    if index not in residual_cache:
+        residual_cache[index] = compute_local_nullcline_dvdt_mV_per_ms(
+            parameters,
+            trace["s"][index],
+            v_values_mV,
+        )
+    if index not in current_cache:
+        current_cache[index] = compute_current_balance_nullcline_pA(
+            parameters,
+            trace["s"][index],
+            v_values_mV,
+        )
+    residual_curve = residual_cache[index]
+    currents = current_cache[index]
+    artists["active_voltage_line"].set_data(t_ms[: index + 1], trace["v_local_mV"][: index + 1])
+    artists["active_g_line"].set_data(t_ms[: index + 1], trace["g_nmda_nS"][: index + 1])
+    artists["active_s_line"].set_data(t_ms[: index + 1], trace["s"][: index + 1])
+    artists["active_dvdt_line"].set_data(t_ms[: index + 1], trace["empirical_dvdt_mV_per_ms"][: index + 1])
+    artists["active_d2vdt2_line"].set_data(
+        t_ms[: index + 1],
+        trace["empirical_d2vdt2_mV_per_ms2"][: index + 1],
+    )
+    artists["residual_line"].set_data(v_values_mV, residual_curve)
+    artists["nmda_line"].set_data(v_values_mV, currents["nmda_pA"])
+    artists["leak_line"].set_data(v_values_mV, currents["leak_balance_pA"])
+    for line in artists["time_lines"]:
+        line.set_xdata([current_t_ms, current_t_ms])
+    artists["residual_v_line"].set_xdata([current_v_mV, current_v_mV])
+    artists["current_v_line"].set_xdata([current_v_mV, current_v_mV])
+    artists["voltage_point"].set_data([current_t_ms], [current_v_mV])
+    artists["g_point"].set_data([current_t_ms], [trace["g_nmda_nS"][index]])
+    artists["s_point"].set_data([current_t_ms], [trace["s"][index]])
+    artists["dvdt_point"].set_data([current_t_ms], [trace["empirical_dvdt_mV_per_ms"][index]])
+    artists["d2vdt2_point"].set_data([current_t_ms], [trace["empirical_d2vdt2_mV_per_ms2"][index]])
+    artists["residual_point"].set_data(
+        [current_v_mV],
+        [np.interp(current_v_mV, v_values_mV, residual_curve)],
+    )
+    nmda_at_v = float(np.interp(current_v_mV, v_values_mV, currents["nmda_pA"]))
+    leak_at_v = float(np.interp(current_v_mV, v_values_mV, currents["leak_balance_pA"]))
+    artists["current_nmda_point"].set_data([current_v_mV], [nmda_at_v])
+    artists["current_leak_point"].set_data([current_v_mV], [leak_at_v])
+    intersections_mV = estimate_current_balance_intersections_mV(currents)
+    intersections_pA = np.interp(intersections_mV, v_values_mV, currents["nmda_pA"])
+    artists["intersection_dots"].set_data(intersections_mV, intersections_pA)
+    artists["intersection_crosshairs"].set_data(intersections_mV, intersections_pA)
+    artists["title"].set_text(
+        f"{metadata['label']} | t={current_t_ms:.3f} ms, "
+        f"V={current_v_mV:.3f} mV, s={trace['s'][index]:.4g}, "
+        f"I_NMDA={nmda_at_v:.4g} pA, -I_L={leak_at_v:.4g} pA"
+    )
 
 
 class SimulateFittedApic20NullclineScriptTestCases(unittest.TestCase):
@@ -653,6 +1329,365 @@ class SimulateFittedApic20NullclineScriptTestCases(unittest.TestCase):
                 "t98ms",
                 "t140ms",
                 "max_reference_empirical_dvdt",
+                "vmax_after_spike_1",
+                "vmax_after_spike_2",
+                "vmax_after_spike_3",
+            },
+            set(snapshots),
+        )
+        for snapshot in snapshots.values():
+            plot_path = Path(snapshot["plot_path"])
+            self.assertTrue(plot_path.exists())
+            self.assertGreater(plot_path.stat().st_size, 0)
+            self.assertTrue(np.isfinite(snapshot["snapshot_v_mV"]))
+            self.assertTrue(np.isfinite(snapshot["snapshot_g_nmda_nS"]))
+
+        show_plots_non_blocking()
+
+
+
+
+
+
+
+
+def _assert_standard_three_spike_outputs(test_case, gif_path, snapshots, metrics_path):
+    test_case.assertTrue(gif_path.exists())
+    test_case.assertGreater(gif_path.stat().st_size, 0)
+    test_case.assertTrue(metrics_path.exists())
+    test_case.assertGreater(metrics_path.stat().st_size, 0)
+    test_case.assertEqual(
+        {
+            "t67ms",
+            "t89ms",
+            "t97ms",
+            "t98ms",
+            "t140ms",
+            "max_reference_empirical_dvdt",
+            "vmax_after_spike_1",
+            "vmax_after_spike_2",
+            "vmax_after_spike_3",
+        },
+        set(snapshots),
+    )
+    for snapshot in snapshots.values():
+        plot_path = Path(snapshot["plot_path"])
+        test_case.assertTrue(plot_path.exists())
+        test_case.assertGreater(plot_path.stat().st_size, 0)
+        test_case.assertTrue(np.isfinite(snapshot["snapshot_v_mV"]))
+
+
+def _assert_current_three_spike_outputs(test_case, gif_path, snapshots, metrics_path):
+    test_case.assertTrue(gif_path.exists())
+    test_case.assertGreater(gif_path.stat().st_size, 0)
+    test_case.assertTrue(metrics_path.exists())
+    test_case.assertGreater(metrics_path.stat().st_size, 0)
+    required_snapshots = {
+        "t67ms",
+        "t89ms",
+        "t97ms",
+        "t98ms",
+        "t140ms",
+        "max_reference_empirical_dvdt",
+        "vmax_after_spike_1",
+        "vmax_after_spike_2",
+        "vmax_after_spike_3",
+    }
+    test_case.assertTrue(required_snapshots.issubset(snapshots))
+    for snapshot in snapshots.values():
+        plot_path = Path(snapshot["plot_path"])
+        test_case.assertTrue(plot_path.exists())
+        test_case.assertGreater(plot_path.stat().st_size, 0)
+        test_case.assertTrue(np.isfinite(snapshot["snapshot_v_mV"]))
+        test_case.assertTrue(np.isfinite(snapshot["snapshot_current_nmda_pA_at_current_v"]))
+
+
+def _assert_two_spike_outputs(test_case, gif_path, snapshots, metrics_path):
+    test_case.assertTrue(gif_path.exists())
+    test_case.assertGreater(gif_path.stat().st_size, 0)
+    test_case.assertTrue(metrics_path.exists())
+    test_case.assertGreater(metrics_path.stat().st_size, 0)
+    test_case.assertEqual(
+        {
+            "spike_1_t50ms",
+            "t67ms",
+            "spike_2_t70ms",
+            "t89ms",
+            "vmax_after_spike_1",
+            "vmax_after_spike_2",
+        },
+        set(snapshots),
+    )
+    for snapshot in snapshots.values():
+        plot_path = Path(snapshot["plot_path"])
+        test_case.assertTrue(plot_path.exists())
+        test_case.assertGreater(plot_path.stat().st_size, 0)
+        test_case.assertTrue(np.isfinite(snapshot["snapshot_v_mV"]))
+
+
+def _run_standard_three_spike_protocol(test_case, with_s_saturation):
+    gif_path, snapshots, metrics_path = generate_fitted_apic20_standard_protocol_outputs(
+        show_plot=True,
+        with_s_saturation=with_s_saturation,
+    )
+    print(gif_path)
+    _assert_standard_three_spike_outputs(test_case, gif_path, snapshots, metrics_path)
+    show_plots_non_blocking()
+
+
+def _run_current_three_spike_protocol(test_case, with_s_saturation):
+    from src.iteration_20_nonlin_dynamics_NMDA.SimulateFittedApic20CurrentNullclineScripts import (
+        generate_fitted_apic20_current_balance_protocol_outputs,
+    )
+
+    gif_path, snapshots, metrics_path = generate_fitted_apic20_current_balance_protocol_outputs(
+        show_plot=True,
+        with_s_saturation=with_s_saturation,
+    )
+    print(gif_path)
+    _assert_current_three_spike_outputs(test_case, gif_path, snapshots, metrics_path)
+    show_plots_non_blocking()
+
+
+def _run_csv_slider_protocol(test_case, protocol_name):
+    trace_path, metadata_path = ensure_fitted_apic20_protocol_csv_bundle(
+        protocol_name=protocol_name,
+    )
+    backend = ensure_interactive_matplotlib_backend()
+    print(f"Launching slider with Matplotlib backend: {backend}")
+    fig, _axes, _slider = launch_fitted_apic20_csv_snapshot_slider(
+        protocol_name=protocol_name,
+        show_plot=True,
+    )
+    test_case.assertTrue(trace_path.exists())
+    test_case.assertGreater(trace_path.stat().st_size, 0)
+    test_case.assertTrue(metadata_path.exists())
+    test_case.assertGreater(metadata_path.stat().st_size, 0)
+    test_case.assertIsNotNone(fig)
+
+
+def _run_current_two_spike_protocol(test_case, with_s_saturation):
+    from src.iteration_20_nonlin_dynamics_NMDA.SimulateFittedApic20CurrentNullclineScripts import (
+        generate_fitted_apic20_current_balance_two_spike_protocol_outputs,
+    )
+
+    gif_path, snapshots, metrics_path = (
+        generate_fitted_apic20_current_balance_two_spike_protocol_outputs(
+            show_plot=True,
+            with_s_saturation=with_s_saturation,
+        )
+    )
+    print(gif_path)
+    _assert_two_spike_outputs(test_case, gif_path, snapshots, metrics_path)
+    for snapshot in snapshots.values():
+        test_case.assertTrue(np.isfinite(snapshot["snapshot_current_nmda_pA_at_current_v"]))
+    show_plots_non_blocking()
+
+
+def _run_standard_two_spike_protocol(test_case, with_s_saturation):
+    gif_path, snapshots, metrics_path = generate_fitted_apic20_two_spike_protocol_outputs(
+        show_plot=True,
+        with_s_saturation=with_s_saturation,
+    )
+    print(gif_path)
+    _assert_two_spike_outputs(test_case, gif_path, snapshots, metrics_path)
+    show_plots_non_blocking()
+
+
+def _linear_standard_three_spike(self):
+    _run_standard_three_spike_protocol(self, with_s_saturation=False)
+
+
+def _linear_current_three_spike(self):
+    _run_current_three_spike_protocol(self, with_s_saturation=False)
+
+
+def _linear_csv_slider(self):
+    _run_csv_slider_protocol(self, INTERACTIVE_CSV_PROTOCOL_NAME)
+
+
+def _linear_current_two_spike(self):
+    _run_current_two_spike_protocol(self, with_s_saturation=False)
+
+
+def _linear_standard_two_spike(self):
+    _run_standard_two_spike_protocol(self, with_s_saturation=False)
+
+
+def _saturated_standard_three_spike(self):
+    _run_standard_three_spike_protocol(self, with_s_saturation=True)
+
+
+def _saturated_current_three_spike(self):
+    _run_current_three_spike_protocol(self, with_s_saturation=True)
+
+
+def _saturated_csv_slider(self):
+    _run_csv_slider_protocol(self, "current_balance_three_spike_with_s_saturation")
+
+
+def _saturated_current_two_spike(self):
+    _run_current_two_spike_protocol(self, with_s_saturation=True)
+
+
+def _saturated_standard_two_spike(self):
+    _run_standard_two_spike_protocol(self, with_s_saturation=True)
+
+
+
+class SimulateFittedApic20NullclineWithSSaturationScriptTestCases(unittest.TestCase):
+    """Manual runnables for the fitted APIC20 protocol with saturating s dynamics."""
+
+    def test_generate_fitted_apic20_moving_nullcline_animation_and_snapshots(self):
+        gif_path, snapshots, metrics_path = (
+            generate_fitted_apic20_standard_protocol_outputs(
+                show_plot=True,
+                with_s_saturation=True,
+            )
+        )
+
+        print(gif_path)
+        self.assertTrue(gif_path.exists())
+        self.assertGreater(gif_path.stat().st_size, 0)
+        self.assertTrue(metrics_path.exists())
+        self.assertGreater(metrics_path.stat().st_size, 0)
+        self.assertEqual(
+            {
+                "t67ms",
+                "t89ms",
+                "t97ms",
+                "t98ms",
+                "t140ms",
+                "max_reference_empirical_dvdt",
+                "vmax_after_spike_1",
+                "vmax_after_spike_2",
+                "vmax_after_spike_3",
+            },
+            set(snapshots),
+        )
+        for snapshot in snapshots.values():
+            plot_path = Path(snapshot["plot_path"])
+            self.assertTrue(plot_path.exists())
+            self.assertGreater(plot_path.stat().st_size, 0)
+            self.assertTrue(np.isfinite(snapshot["snapshot_v_mV"]))
+            self.assertTrue(np.isfinite(snapshot["snapshot_g_nmda_nS"]))
+
+        show_plots_non_blocking()
+
+    def test_generate_fitted_apic20_current_balance_animation_and_snapshots(self):
+        from src.iteration_20_nonlin_dynamics_NMDA.SimulateFittedApic20CurrentNullclineScripts import (
+            generate_fitted_apic20_current_balance_protocol_outputs,
+        )
+
+        gif_path, snapshots, metrics_path = (
+            generate_fitted_apic20_current_balance_protocol_outputs(
+                show_plot=True,
+                with_s_saturation=True,
+            )
+        )
+
+        print(gif_path)
+        self.assertTrue(gif_path.exists())
+        self.assertGreater(gif_path.stat().st_size, 0)
+        self.assertTrue(metrics_path.exists())
+        self.assertGreater(metrics_path.stat().st_size, 0)
+        required_snapshots = {
+            "t67ms",
+            "t89ms",
+            "t97ms",
+            "t98ms",
+            "t140ms",
+            "max_reference_empirical_dvdt",
+            "vmax_after_spike_1",
+            "vmax_after_spike_2",
+            "vmax_after_spike_3",
+        }
+        self.assertTrue(required_snapshots.issubset(snapshots))
+        for snapshot in snapshots.values():
+            plot_path = Path(snapshot["plot_path"])
+            self.assertTrue(plot_path.exists())
+            self.assertGreater(plot_path.stat().st_size, 0)
+            self.assertTrue(np.isfinite(snapshot["snapshot_v_mV"]))
+            self.assertTrue(np.isfinite(snapshot["snapshot_current_nmda_pA_at_current_v"]))
+
+        show_plots_non_blocking()
+
+    def test_launch_fitted_apic20_csv_snapshot_slider(self):
+        protocol_name = "current_balance_three_spike_with_s_saturation"
+        trace_path, metadata_path = ensure_fitted_apic20_protocol_csv_bundle(
+            protocol_name=protocol_name,
+        )
+        backend = ensure_interactive_matplotlib_backend()
+        print(f"Launching slider with Matplotlib backend: {backend}")
+        fig, _axes, _slider = launch_fitted_apic20_csv_snapshot_slider(
+            protocol_name=protocol_name,
+            show_plot=True,
+        )
+
+        self.assertTrue(trace_path.exists())
+        self.assertGreater(trace_path.stat().st_size, 0)
+        self.assertTrue(metadata_path.exists())
+        self.assertGreater(metadata_path.stat().st_size, 0)
+        self.assertIsNotNone(fig)
+
+    def test_generate_fitted_apic20_current_balance_two_spike_protocol(self):
+        from src.iteration_20_nonlin_dynamics_NMDA.SimulateFittedApic20CurrentNullclineScripts import (
+            generate_fitted_apic20_current_balance_two_spike_protocol_outputs,
+        )
+
+        gif_path, snapshots, metrics_path = (
+            generate_fitted_apic20_current_balance_two_spike_protocol_outputs(
+                show_plot=True,
+                with_s_saturation=True,
+            )
+        )
+
+        print(gif_path)
+        self.assertTrue(gif_path.exists())
+        self.assertGreater(gif_path.stat().st_size, 0)
+        self.assertTrue(metrics_path.exists())
+        self.assertGreater(metrics_path.stat().st_size, 0)
+        self.assertEqual(
+            {
+                "spike_1_t50ms",
+                "t67ms",
+                "spike_2_t70ms",
+                "t89ms",
+                "vmax_after_spike_1",
+                "vmax_after_spike_2",
+            },
+            set(snapshots),
+        )
+        for snapshot in snapshots.values():
+            plot_path = Path(snapshot["plot_path"])
+            self.assertTrue(plot_path.exists())
+            self.assertGreater(plot_path.stat().st_size, 0)
+            self.assertTrue(np.isfinite(snapshot["snapshot_v_mV"]))
+            self.assertTrue(np.isfinite(snapshot["snapshot_current_nmda_pA_at_current_v"]))
+
+        show_plots_non_blocking()
+
+    def test_generate_fitted_apic20_two_spike_nullcline_protocol(self):
+        gif_path, snapshots, metrics_path = (
+            generate_fitted_apic20_two_spike_protocol_outputs(
+                show_plot=True,
+                with_s_saturation=True,
+            )
+        )
+        print(gif_path)
+
+        self.assertTrue(gif_path.exists())
+        self.assertGreater(gif_path.stat().st_size, 0)
+        self.assertTrue(metrics_path.exists())
+        self.assertGreater(metrics_path.stat().st_size, 0)
+        self.assertEqual(
+            {
+                "spike_1_t50ms",
+                "t67ms",
+                "spike_2_t70ms",
+                "t89ms",
+                "vmax_after_spike_1",
+                "vmax_after_spike_2",
             },
             set(snapshots),
         )
@@ -686,6 +1721,9 @@ class SimulateFittedApic20NullclineScriptTestCases(unittest.TestCase):
             "t98ms",
             "t140ms",
             "max_reference_empirical_dvdt",
+            "vmax_after_spike_1",
+            "vmax_after_spike_2",
+            "vmax_after_spike_3",
         }
         self.assertTrue(required_snapshots.issubset(snapshots))
         for snapshot in snapshots.values():
@@ -697,20 +1735,49 @@ class SimulateFittedApic20NullclineScriptTestCases(unittest.TestCase):
 
         show_plots_non_blocking()
 
-    def test_generate_fitted_apic20_current_balance_spike_time_snapshots(self):
+    def test_launch_fitted_apic20_csv_snapshot_slider(self):
+        trace_path, metadata_path = ensure_fitted_apic20_protocol_csv_bundle(
+            protocol_name=INTERACTIVE_CSV_PROTOCOL_NAME,
+        )
+        backend = ensure_interactive_matplotlib_backend()
+        print(f"Launching slider with Matplotlib backend: {backend}")
+        fig, _axes, _slider = launch_fitted_apic20_csv_snapshot_slider(
+            protocol_name=INTERACTIVE_CSV_PROTOCOL_NAME,
+            show_plot=True,
+        )
+
+        self.assertTrue(trace_path.exists())
+        self.assertGreater(trace_path.stat().st_size, 0)
+        self.assertTrue(metadata_path.exists())
+        self.assertGreater(metadata_path.stat().st_size, 0)
+        self.assertIsNotNone(fig)
+
+    def test_generate_fitted_apic20_current_balance_two_spike_protocol(self):
         from src.iteration_20_nonlin_dynamics_NMDA.SimulateFittedApic20CurrentNullclineScripts import (
-            generate_fitted_apic20_current_balance_spike_time_snapshot_protocol_outputs,
+            generate_fitted_apic20_current_balance_two_spike_protocol_outputs,
         )
 
-        snapshots, metrics_path = (
-            generate_fitted_apic20_current_balance_spike_time_snapshot_protocol_outputs(
-                show_plot=True
-            )
+        gif_path, snapshots, metrics_path = (
+            generate_fitted_apic20_current_balance_two_spike_protocol_outputs(show_plot=True)
         )
 
+        print(gif_path)
+
+        self.assertTrue(gif_path.exists())
+        self.assertGreater(gif_path.stat().st_size, 0)
         self.assertTrue(metrics_path.exists())
         self.assertGreater(metrics_path.stat().st_size, 0)
-        self.assertEqual({"spike_1_t50ms", "spike_2_t70ms"}, set(snapshots))
+        self.assertEqual(
+            {
+                "spike_1_t50ms",
+                "t67ms",
+                "spike_2_t70ms",
+                "t89ms",
+                "vmax_after_spike_1",
+                "vmax_after_spike_2",
+            },
+            set(snapshots),
+        )
         for snapshot in snapshots.values():
             plot_path = Path(snapshot["plot_path"])
             self.assertTrue(plot_path.exists())
@@ -720,14 +1787,27 @@ class SimulateFittedApic20NullclineScriptTestCases(unittest.TestCase):
 
         show_plots_non_blocking()
 
-    def test_generate_fitted_apic20_spike_time_nullcline_snapshots(self):
-        snapshots, metrics_path = (
-            generate_fitted_apic20_spike_time_snapshot_protocol_outputs(show_plot=True)
+    def test_generate_fitted_apic20_two_spike_nullcline_protocol(self):
+        gif_path, snapshots, metrics_path = (
+            generate_fitted_apic20_two_spike_protocol_outputs(show_plot=True)
         )
+        print(gif_path)
 
+        self.assertTrue(gif_path.exists())
+        self.assertGreater(gif_path.stat().st_size, 0)
         self.assertTrue(metrics_path.exists())
         self.assertGreater(metrics_path.stat().st_size, 0)
-        self.assertEqual({"spike_1_t50ms", "spike_2_t70ms"}, set(snapshots))
+        self.assertEqual(
+            {
+                "spike_1_t50ms",
+                "t67ms",
+                "spike_2_t70ms",
+                "t89ms",
+                "vmax_after_spike_1",
+                "vmax_after_spike_2",
+            },
+            set(snapshots),
+        )
         for snapshot in snapshots.values():
             plot_path = Path(snapshot["plot_path"])
             self.assertTrue(plot_path.exists())
@@ -736,3 +1816,16 @@ class SimulateFittedApic20NullclineScriptTestCases(unittest.TestCase):
             self.assertTrue(np.isfinite(snapshot["snapshot_g_nmda_nS"]))
 
         show_plots_non_blocking()
+
+
+SimulateFittedApic20NullclineScriptTestCases.test_generate_fitted_apic20_moving_nullcline_animation_and_snapshots = _linear_standard_three_spike
+SimulateFittedApic20NullclineScriptTestCases.test_generate_fitted_apic20_current_balance_animation_and_snapshots = _linear_current_three_spike
+SimulateFittedApic20NullclineScriptTestCases.test_launch_fitted_apic20_csv_snapshot_slider = _linear_csv_slider
+SimulateFittedApic20NullclineScriptTestCases.test_generate_fitted_apic20_current_balance_two_spike_protocol = _linear_current_two_spike
+SimulateFittedApic20NullclineScriptTestCases.test_generate_fitted_apic20_two_spike_nullcline_protocol = _linear_standard_two_spike
+
+SimulateFittedApic20NullclineWithSSaturationScriptTestCases.test_generate_fitted_apic20_moving_nullcline_animation_and_snapshots = _saturated_standard_three_spike
+SimulateFittedApic20NullclineWithSSaturationScriptTestCases.test_generate_fitted_apic20_current_balance_animation_and_snapshots = _saturated_current_three_spike
+SimulateFittedApic20NullclineWithSSaturationScriptTestCases.test_launch_fitted_apic20_csv_snapshot_slider = _saturated_csv_slider
+SimulateFittedApic20NullclineWithSSaturationScriptTestCases.test_generate_fitted_apic20_current_balance_two_spike_protocol = _saturated_current_two_spike
+SimulateFittedApic20NullclineWithSSaturationScriptTestCases.test_generate_fitted_apic20_two_spike_nullcline_protocol = _saturated_standard_two_spike
