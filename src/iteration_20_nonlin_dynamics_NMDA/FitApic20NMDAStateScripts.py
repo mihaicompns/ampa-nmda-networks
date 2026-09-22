@@ -48,6 +48,17 @@ def reconstruct_normalized_s_from_g_nmda(reference):
     return reference.g_nmda_nS / (reference_g_nmda_max_nS * sigma)
 
 
+def read_nmda_state_fit_reference(reference=None, fit_start_ms=None):
+    if reference is None:
+        reference = read_standard_apic20_reference()
+    if fit_start_ms is None:
+        fit_start_ms = float(reference.spike_times_ms[0])
+
+    target_s = reconstruct_normalized_s_from_g_nmda(reference)
+    fit_mask = reference.t_ms >= float(fit_start_ms)
+    return reference, target_s, fit_mask
+
+
 def simulate_nmda_x_s_state(
     t_ms,
     spike_times_ms,
@@ -86,26 +97,15 @@ def simulate_nmda_x_s_state(
     return {"x": x, "s": s}
 
 
-def fit_nmda_s_state_to_apic20_reference(
-    reference=None,
+def fit_nmda_s_state_parameters(
+    reference,
+    target_s,
+    fit_mask,
     spike_weight=1.0,
-    capacitance_nF=0.0007312381418499121,
-    g_leak_nS=0.024374604728330404,
-    e_leak_mV=-70.0,
-    e_excitatory_mV=0.0,
-    fit_start_ms=None,
     initial_tau_rise_ms=2.0,
     initial_tau_decay_ms=100.0,
     initial_alpha_per_ms=0.5,
 ):
-    if reference is None:
-        reference = read_standard_apic20_reference()
-    if fit_start_ms is None:
-        fit_start_ms = float(reference.spike_times_ms[0])
-
-    target_s = reconstruct_normalized_s_from_g_nmda(reference)
-    fit_mask = reference.t_ms >= float(fit_start_ms)
-
     def unpack(log_values):
         tau_rise_ms, tau_decay_gap_ms, alpha_per_ms = np.exp(log_values)
         return tau_rise_ms, tau_rise_ms + tau_decay_gap_ms, alpha_per_ms
@@ -141,14 +141,18 @@ def fit_nmda_s_state_to_apic20_reference(
         ),
     )
     tau_rise_ms, tau_decay_ms, alpha_per_ms = unpack(optimizer_result.x)
-    simulation = simulate_nmda_x_s_state(
-        t_ms=reference.t_ms,
-        spike_times_ms=reference.spike_times_ms,
-        spike_weight=spike_weight,
-        tau_rise_ms=tau_rise_ms,
-        tau_decay_ms=tau_decay_ms,
-        alpha_per_ms=alpha_per_ms,
-    )
+    return tau_rise_ms, tau_decay_ms, alpha_per_ms, optimizer_result
+
+
+def simulate_nmda_state_fit_outputs(
+    reference,
+    simulation,
+    fit_mask,
+    capacitance_nF,
+    g_leak_nS,
+    e_leak_mV,
+    e_excitatory_mV,
+):
     sigma = compute_nmda_sigma_from_animation(reference.v_local_mV)
     fitted_g_nmda_max_nS = _least_squares_scale(
         basis=sigma[fit_mask] * simulation["s"][fit_mask],
@@ -165,9 +169,84 @@ def fit_nmda_s_state_to_apic20_reference(
         e_excitatory_mV=e_excitatory_mV,
         g_nmda_max_nS=fitted_g_nmda_max_nS,
     )
+    return fitted_g_nmda_max_nS, fitted_g_nmda_nS, fitted_v_mV
+
+
+def compute_nmda_state_fit_error_statistics(
+    reference,
+    target_s,
+    simulation,
+    fitted_g_nmda_nS,
+    fitted_v_mV,
+    fit_mask,
+):
     s_error = simulation["s"][fit_mask] - target_s[fit_mask]
     g_error = fitted_g_nmda_nS[fit_mask] - reference.g_nmda_nS[fit_mask]
     voltage_error = fitted_v_mV[fit_mask] - reference.v_local_mV[fit_mask]
+    return {
+        "s_mse": float(np.mean(s_error**2)),
+        "s_rmse": float(np.sqrt(np.mean(s_error**2))),
+        "g_nmda_mse_nS2": float(np.mean(g_error**2)),
+        "g_nmda_rmse_nS": float(np.sqrt(np.mean(g_error**2))),
+        "voltage_mse_mV2": float(np.mean(voltage_error**2)),
+        "voltage_rmse_mV": float(np.sqrt(np.mean(voltage_error**2))),
+    }
+
+
+def fit_nmda_s_state_to_apic20_reference(
+    reference=None,
+    spike_weight=1.0,
+    capacitance_nF=0.0007312381418499121,
+    g_leak_nS=0.024374604728330404,
+    e_leak_mV=-70.0,
+    e_excitatory_mV=0.0,
+    fit_start_ms=None,
+    initial_tau_rise_ms=2.0,
+    initial_tau_decay_ms=100.0,
+    initial_alpha_per_ms=0.5,
+):
+    reference, target_s, fit_mask = read_nmda_state_fit_reference(
+        reference=reference,
+        fit_start_ms=fit_start_ms,
+    )
+    tau_rise_ms, tau_decay_ms, alpha_per_ms, optimizer_result = (
+        fit_nmda_s_state_parameters(
+            reference=reference,
+            target_s=target_s,
+            fit_mask=fit_mask,
+            spike_weight=spike_weight,
+            initial_tau_rise_ms=initial_tau_rise_ms,
+            initial_tau_decay_ms=initial_tau_decay_ms,
+            initial_alpha_per_ms=initial_alpha_per_ms,
+        )
+    )
+    simulation = simulate_nmda_x_s_state(
+        t_ms=reference.t_ms,
+        spike_times_ms=reference.spike_times_ms,
+        spike_weight=spike_weight,
+        tau_rise_ms=tau_rise_ms,
+        tau_decay_ms=tau_decay_ms,
+        alpha_per_ms=alpha_per_ms,
+    )
+    fitted_g_nmda_max_nS, fitted_g_nmda_nS, fitted_v_mV = (
+        simulate_nmda_state_fit_outputs(
+            reference=reference,
+            simulation=simulation,
+            fit_mask=fit_mask,
+            capacitance_nF=capacitance_nF,
+            g_leak_nS=g_leak_nS,
+            e_leak_mV=e_leak_mV,
+            e_excitatory_mV=e_excitatory_mV,
+        )
+    )
+    error_statistics = compute_nmda_state_fit_error_statistics(
+        reference=reference,
+        target_s=target_s,
+        simulation=simulation,
+        fitted_g_nmda_nS=fitted_g_nmda_nS,
+        fitted_v_mV=fitted_v_mV,
+        fit_mask=fit_mask,
+    )
 
     fit_result = NMDASStateFitResult(
         spike_weight=float(spike_weight),
@@ -176,16 +255,16 @@ def fit_nmda_s_state_to_apic20_reference(
         alpha_per_ms=float(alpha_per_ms),
         fitted_g_nmda_max_nS=float(fitted_g_nmda_max_nS),
         reference_g_nmda_max_nS=float(reference.metadata["gmaxnmda"]),
-        capacitance_nF=float(capacitance_nF),
-        g_leak_nS=float(g_leak_nS),
-        e_leak_mV=float(e_leak_mV),
-        e_excitatory_mV=float(e_excitatory_mV),
-        s_mse=float(np.mean(s_error**2)),
-        s_rmse=float(np.sqrt(np.mean(s_error**2))),
-        g_nmda_mse_nS2=float(np.mean(g_error**2)),
-        g_nmda_rmse_nS=float(np.sqrt(np.mean(g_error**2))),
-        voltage_mse_mV2=float(np.mean(voltage_error**2)),
-        voltage_rmse_mV=float(np.sqrt(np.mean(voltage_error**2))),
+        capacitance_nF=capacitance_nF,
+        g_leak_nS=g_leak_nS,
+        e_leak_mV=e_leak_mV,
+        e_excitatory_mV=e_excitatory_mV,
+        s_mse=error_statistics["s_mse"],
+        s_rmse=error_statistics["s_rmse"],
+        g_nmda_mse_nS2=error_statistics["g_nmda_mse_nS2"],
+        g_nmda_rmse_nS=error_statistics["g_nmda_rmse_nS"],
+        voltage_mse_mV2=error_statistics["voltage_mse_mV2"],
+        voltage_rmse_mV=error_statistics["voltage_rmse_mV"],
         optimizer_success=bool(optimizer_result.success),
         optimizer_message=str(optimizer_result.message),
     )
@@ -227,7 +306,7 @@ def simulate_voltage_from_nmda_state(
     return v_mV
 
 
-def fit_g_leak_for_voltage_replay(
+def fit_g_leak_parameter_for_voltage_replay(
     reference,
     s,
     g_nmda_max_nS,
@@ -261,6 +340,31 @@ def fit_g_leak_for_voltage_replay(
         bounds=(np.log([1e-6]), np.log([50.0])),
     )
     fitted_g_leak_nS = float(np.exp(optimizer_result.x[0]))
+    return fitted_g_leak_nS, optimizer_result
+
+
+def fit_g_leak_for_voltage_replay(
+    reference,
+    s,
+    g_nmda_max_nS,
+    capacitance_nF,
+    e_leak_mV,
+    e_excitatory_mV,
+    initial_g_leak_nS,
+    fit_start_ms=50.0,
+):
+    fitted_g_leak_nS, optimizer_result = (
+        fit_g_leak_parameter_for_voltage_replay(
+            reference=reference,
+            s=s,
+            g_nmda_max_nS=g_nmda_max_nS,
+            capacitance_nF=capacitance_nF,
+            e_leak_mV=e_leak_mV,
+            e_excitatory_mV=e_excitatory_mV,
+            initial_g_leak_nS=initial_g_leak_nS,
+            fit_start_ms=fit_start_ms,
+        )
+    )
     fitted_v_mV = simulate_voltage_from_nmda_state(
         t_ms=reference.t_ms,
         s=s,
@@ -279,7 +383,7 @@ def fit_g_leak_for_voltage_replay(
     return fitted_g_leak_nS, fitted_v_mV, voltage_rmse_mV, optimizer_result
 
 
-def fit_capacitance_and_g_leak_for_voltage_replay(
+def fit_capacitance_and_g_leak_parameters_for_voltage_replay(
     reference,
     s,
     g_nmda_max_nS,
@@ -316,6 +420,31 @@ def fit_capacitance_and_g_leak_for_voltage_replay(
         ),
     )
     fitted_capacitance_nF, fitted_g_leak_nS = np.exp(optimizer_result.x)
+    return float(fitted_capacitance_nF), float(fitted_g_leak_nS), optimizer_result
+
+
+def fit_capacitance_and_g_leak_for_voltage_replay(
+    reference,
+    s,
+    g_nmda_max_nS,
+    e_leak_mV,
+    e_excitatory_mV,
+    initial_capacitance_nF,
+    initial_g_leak_nS,
+    fit_start_ms=50.0,
+):
+    fitted_capacitance_nF, fitted_g_leak_nS, optimizer_result = (
+        fit_capacitance_and_g_leak_parameters_for_voltage_replay(
+            reference=reference,
+            s=s,
+            g_nmda_max_nS=g_nmda_max_nS,
+            e_leak_mV=e_leak_mV,
+            e_excitatory_mV=e_excitatory_mV,
+            initial_capacitance_nF=initial_capacitance_nF,
+            initial_g_leak_nS=initial_g_leak_nS,
+            fit_start_ms=fit_start_ms,
+        )
+    )
     fitted_v_mV = simulate_voltage_from_nmda_state(
         t_ms=reference.t_ms,
         s=s,
@@ -332,8 +461,8 @@ def fit_capacitance_and_g_leak_for_voltage_replay(
         fit_start_ms=fit_start_ms,
     )
     return (
-        float(fitted_capacitance_nF),
-        float(fitted_g_leak_nS),
+        fitted_capacitance_nF,
+        fitted_g_leak_nS,
         fitted_v_mV,
         voltage_rmse_mV,
         optimizer_result,
@@ -450,32 +579,29 @@ def plot_nmda_s_state_fit(
     axes[1].plot(
         reference.t_ms,
         target_s,
-        color="black",
-        linewidth=2,
+        linewidth=2.5,
         alpha=alpha,
         label="CSV reconstructed s(t)",
     )
     axes[1].plot(
         reference.t_ms,
         simulation["s"],
-        color="#1f77b4",
-        linewidth=2,
+        linewidth=1.5,
         alpha=alpha,
+        linestyle=":",
         label="fitted s(t)",
     )
     axes[2].plot(
         reference.t_ms,
         reference.g_nmda_nS,
-        color="black",
-        linewidth=2,
+        linewidth=3.5,
         alpha=alpha,
         label="CSV g_NMDA(t)",
     )
     axes[2].plot(
         reference.t_ms,
         fitted_g_nmda_nS,
-        color="#2ca02c",
-        linewidth=3,
+        linewidth=2.5,
         alpha=alpha,
         linestyle=":",
         label="gmax * sigma(V) * fitted s(t)",
@@ -485,7 +611,7 @@ def plot_nmda_s_state_fit(
         reference.t_ms,
         fitted_g_nmda_nS - reference.g_nmda_nS,
         color="#d62728",
-        linewidth=1.5,
+        linewidth=3.5,
         label="fit - CSV",
     )
     axes[4].plot(
@@ -523,6 +649,220 @@ def plot_nmda_s_state_fit(
         f"alpha={fit_result.alpha_per_ms:.4g} /ms, "
         f"gmax={fit_result.fitted_g_nmda_max_nS:.4g} nS, "
         f"V RMSE={fit_result.voltage_rmse_mV:.4g} mV"
+    )
+    fig.tight_layout()
+    return fig, axes
+
+
+def plot_voltage_replay_parameter_fit(
+    reference,
+    target_s,
+    simulation,
+    fitted_g_nmda_nS,
+    passive_v_mV,
+    reduced_axial_v_mV,
+    fitted_v_mV,
+    passive_error_summary,
+    reduced_axial_error_summary,
+    fitted_error_summary,
+    original_capacitance_nF,
+    fitted_capacitance_nF,
+    original_g_leak_nS,
+    fitted_g_leak_nS,
+):
+    fig, axes = plt.subplots(
+        nrows=4,
+        ncols=3,
+        figsize=(16, 12),
+        sharex=True,
+    )
+    alpha = 0.75
+
+    axes[0, 0].plot(
+        reference.t_ms,
+        simulation["x"],
+        color="#9467bd",
+        linewidth=2,
+        alpha=alpha,
+        label="fitted x(t)",
+    )
+    axes[1, 0].plot(
+        reference.t_ms,
+        simulation["s"],
+        color="#1f77b4",
+        linewidth=2,
+        alpha=alpha,
+        label="fitted s(t)",
+    )
+    axes[1, 0].plot(
+        reference.t_ms,
+        target_s,
+        color="black",
+        linewidth=1.6,
+        alpha=0.65,
+        linestyle="--",
+        label="CSV reconstructed s(t)",
+    )
+    axes[2, 0].plot(
+        reference.t_ms,
+        reference.g_nmda_nS,
+        color="black",
+        linewidth=2,
+        alpha=alpha,
+        label="CSV g_NMDA(t)",
+    )
+    axes[2, 0].plot(
+        reference.t_ms,
+        fitted_g_nmda_nS,
+        color="#2ca02c",
+        linewidth=2,
+        alpha=alpha,
+        label="gmax * sigma(V) * fitted s(t)",
+    )
+    axes[3, 0].axhline(0.0, color="0.35", linestyle="--", linewidth=1.0)
+    axes[3, 0].plot(
+        reference.t_ms,
+        fitted_g_nmda_nS - reference.g_nmda_nS,
+        color="#d62728",
+        linewidth=1.5,
+        label="g_NMDA fit - CSV",
+    )
+
+    voltage_stages = [
+        (
+            axes[0, 1],
+            axes[0, 2],
+            passive_v_mV,
+            passive_error_summary,
+            "passive + fitted NMDA",
+            "#ff7f0e",
+        ),
+        (
+            axes[1, 1],
+            axes[1, 2],
+            reduced_axial_v_mV,
+            reduced_axial_error_summary,
+            "minus recorded axial",
+            "#2ca02c",
+        ),
+        (
+            axes[2, 1],
+            axes[2, 2],
+            fitted_v_mV,
+            fitted_error_summary,
+            "fit C_m and g_L",
+            "#1f77b4",
+        ),
+    ]
+    stage_errors = []
+    for (
+        voltage_ax,
+        error_ax,
+        stage_v_mV,
+        error_summary,
+        label,
+        color,
+    ) in voltage_stages:
+        voltage_ax.plot(
+            reference.t_ms,
+            reference.v_local_mV,
+            color="black",
+            linewidth=2,
+            alpha=0.8,
+            label="CSV V(t)",
+        )
+        voltage_ax.plot(
+            reference.t_ms,
+            stage_v_mV,
+            color=color,
+            linewidth=1.8,
+            alpha=0.85,
+            label=f"{label}, RMSE={error_summary['rmse_mV']:.3g} mV",
+        )
+        stage_error_mV = np.asarray(stage_v_mV, dtype=float) - reference.v_local_mV
+        stage_errors.append((stage_error_mV, label, color))
+        error_ax.axhline(0.0, color="0.35", linestyle="--", linewidth=1.0)
+        error_ax.plot(
+            reference.t_ms,
+            stage_error_mV,
+            color=color,
+            linewidth=1.4,
+            alpha=0.85,
+            label=f"{label} error",
+        )
+
+    axes[3, 1].axhline(0.0, color="0.35", linestyle="--", linewidth=1.0)
+    for stage_error_mV, label, color in stage_errors:
+        axes[3, 1].plot(
+            reference.t_ms,
+            stage_error_mV,
+            color=color,
+            linewidth=1.2,
+            alpha=0.8,
+            label=label,
+        )
+
+    axes[3, 2].axis("off")
+    axes[3, 2].text(
+        0.02,
+        0.95,
+        "\n".join(
+            [
+                "Voltage error statistics",
+                (
+                    "passive: "
+                    f"RMSE={passive_error_summary['rmse_mV']:.4g} mV, "
+                    f"MAE={passive_error_summary['mae_mV']:.4g} mV"
+                ),
+                (
+                    "minus axial: "
+                    f"RMSE={reduced_axial_error_summary['rmse_mV']:.4g} mV, "
+                    f"MAE={reduced_axial_error_summary['mae_mV']:.4g} mV"
+                ),
+                (
+                    "fit C_m/g_L: "
+                    f"RMSE={fitted_error_summary['rmse_mV']:.4g} mV, "
+                    f"MAE={fitted_error_summary['mae_mV']:.4g} mV"
+                ),
+                (
+                    "max |error| fit: "
+                    f"{fitted_error_summary['max_abs_error_mV']:.4g} mV"
+                ),
+            ]
+        ),
+        transform=axes[3, 2].transAxes,
+        va="top",
+        ha="left",
+        fontsize=10,
+    )
+
+    for ax in axes.ravel():
+        if not ax.axison:
+            continue
+        for spike_time_ms in reference.spike_times_ms:
+            ax.axvline(spike_time_ms, color="0.75", linestyle=":", linewidth=1.0)
+        ax.legend(loc="best")
+
+    axes[0, 0].set_ylabel("x")
+    axes[1, 0].set_ylabel("s")
+    axes[2, 0].set_ylabel("g_NMDA [nS]")
+    axes[3, 0].set_ylabel("residual [nS]")
+    axes[0, 1].set_ylabel("V [mV]")
+    axes[1, 1].set_ylabel("V [mV]")
+    axes[2, 1].set_ylabel("V [mV]")
+    axes[3, 1].set_ylabel("error [mV]")
+    axes[0, 2].set_ylabel("error [mV]")
+    axes[1, 2].set_ylabel("error [mV]")
+    axes[2, 2].set_ylabel("error [mV]")
+    axes[3, 0].set_xlabel("t [ms]")
+    axes[3, 1].set_xlabel("t [ms]")
+    axes[2, 2].set_xlabel("t [ms]")
+    fig.suptitle(
+        "APIC20 NMDA state fit and voltage replay stages\n"
+        f"C_m: {original_capacitance_nF:.6g} -> {fitted_capacitance_nF:.6g} nF, "
+        f"g_L: {original_g_leak_nS:.6g} -> {fitted_g_leak_nS:.6g} nS, "
+        f"fit RMSE={fitted_error_summary['rmse_mV']:.4g} mV, "
+        f"max |error|={fitted_error_summary['max_abs_error_mV']:.4g} mV"
     )
     fig.tight_layout()
     return fig, axes
@@ -813,35 +1153,49 @@ def run_standard_apic20_nmda_s_state_fit_capacitance_and_g_leak(
         reference=reference,
         fitted_v_mV=fitted_v_mV,
     )
-    fig, axes = plot_nmda_s_state_fit(
+    fixed_error_summary = compute_voltage_error_summary(
+        reference=reference,
+        fitted_v_mV=fitted_v_mV,
+    )
+    recorded_axial_current_out_total_nA = (
+        read_recorded_axial_current_out_total_nA(reference)
+    )
+    fitted_v_subtracting_axial_mV = (
+        simulate_voltage_from_nmda_state_subtracting_axial_current(
+            t_ms=reference.t_ms,
+            s=simulation["s"],
+            recorded_axial_current_out_total_nA=recorded_axial_current_out_total_nA,
+            initial_v_mV=float(reference.v_local_mV[0]),
+            capacitance_nF=fit_result.capacitance_nF,
+            g_leak_nS=fit_result.g_leak_nS,
+            e_leak_mV=fit_result.e_leak_mV,
+            e_excitatory_mV=fit_result.e_excitatory_mV,
+            g_nmda_max_nS=fit_result.fitted_g_nmda_max_nS,
+        )
+    )
+    reduced_axial_error_summary = compute_voltage_error_summary(
+        reference=reference,
+        fitted_v_mV=fitted_v_subtracting_axial_mV,
+    )
+    fitted_error_summary = compute_voltage_error_summary(
+        reference=reference,
+        fitted_v_mV=fitted_v_with_fitted_capacitance_and_g_leak_mV,
+    )
+    fig, axes = plot_voltage_replay_parameter_fit(
         reference=reference,
         target_s=target_s,
         simulation=simulation,
         fitted_g_nmda_nS=fitted_g_nmda_nS,
-        fitted_v_mV=fitted_v_mV,
-        fit_result=fit_result,
-    )
-    axes[4].plot(
-        reference.t_ms,
-        fitted_v_with_fitted_capacitance_and_g_leak_mV,
-        color="#1f77b4",
-        linewidth=2,
-        alpha=0.7,
-        label=(
-            f"fit C_m={fitted_capacitance_nF:.4g} nF, "
-            f"g_L={fitted_g_leak_nS:.4g} nS, "
-            f"RMSE={voltage_capacitance_and_g_leak_rmse_mV:.3g} mV"
-        ),
-    )
-    axes[4].legend(loc="best")
-    fig.suptitle(
-        "APIC20 NMDA state fit with voltage replay fitting C_m and g_L\n"
-        f"original C_m={fit_result.capacitance_nF:.6g} nF, "
-        f"fitted C_m={fitted_capacitance_nF:.6g} nF, "
-        f"original g_L={fit_result.g_leak_nS:.6g} nS, "
-        f"fitted g_L={fitted_g_leak_nS:.6g} nS, "
-        f"fixed RMSE={voltage_rmse_mV:.4g} mV, "
-        f"fit RMSE={voltage_capacitance_and_g_leak_rmse_mV:.4g} mV"
+        passive_v_mV=fitted_v_mV,
+        reduced_axial_v_mV=fitted_v_subtracting_axial_mV,
+        fitted_v_mV=fitted_v_with_fitted_capacitance_and_g_leak_mV,
+        passive_error_summary=fixed_error_summary,
+        reduced_axial_error_summary=reduced_axial_error_summary,
+        fitted_error_summary=fitted_error_summary,
+        original_capacitance_nF=fit_result.capacitance_nF,
+        fitted_capacitance_nF=fitted_capacitance_nF,
+        original_g_leak_nS=fit_result.g_leak_nS,
+        fitted_g_leak_nS=fitted_g_leak_nS,
     )
 
     output_dir = Path(output_dir)
@@ -866,6 +1220,9 @@ def run_standard_apic20_nmda_s_state_fit_capacitance_and_g_leak(
                 "voltage_fit_capacitance_and_g_leak_rmse_mV": (
                     voltage_capacitance_and_g_leak_rmse_mV
                 ),
+                "fixed_voltage_error": fixed_error_summary,
+                "reduced_axial_voltage_error": reduced_axial_error_summary,
+                "fitted_voltage_error": fitted_error_summary,
                 "original_capacitance_nF": fit_result.capacitance_nF,
                 "fitted_capacitance_nF": fitted_capacitance_nF,
                 "original_g_leak_nS": fit_result.g_leak_nS,
@@ -950,6 +1307,15 @@ class FitApic20NMDAStateScriptTestCases(unittest.TestCase):
         self.assertTrue(metrics_path.exists())
         self.assertGreater(metrics_path.stat().st_size, 0)
         self.assertEqual(3, reference.n_spikes)
+
+        self.assertAlmostEqual(2.0410914401846654, fit_result.tau_rise_ms)
+        self.assertAlmostEqual(50.10415366928407, fit_result.tau_decay_ms)
+        self.assertAlmostEqual(0.46920177087184145, fit_result.alpha_per_ms)
+        self.assertAlmostEqual(0.0007312381418499121, fit_result.capacitance_nF)
+        self.assertAlmostEqual(0.024374604728330404, fit_result.g_leak_nS)
+        self.assertAlmostEqual(13.927782392735084, fit_result.fitted_g_nmda_max_nS)
+        self.assertTrue(fit_result.optimizer_success)
+
         self.assertGreater(fit_result.tau_decay_ms, fit_result.tau_rise_ms)
         self.assertGreater(fit_result.alpha_per_ms, 0.0)
         self.assertGreater(fit_result.fitted_g_nmda_max_nS, 0.0)
@@ -1020,6 +1386,7 @@ class FitApic20NMDAStateScriptTestCases(unittest.TestCase):
 
         show_plots_non_blocking()
 
+    ''' Final and correct fit '''
     def test_fit_standard_apic20_nmda_s_state_fit_capacitance_and_g_leak(self):
         (
             reference,
@@ -1049,8 +1416,42 @@ class FitApic20NMDAStateScriptTestCases(unittest.TestCase):
         self.assertTrue(
             np.all(np.isfinite(fitted_v_with_fitted_capacitance_and_g_leak_mV))
         )
-        self.assertGreater(fitted_capacitance_nF, 0.0)
-        self.assertGreater(fitted_g_leak_nS, 0.0)
-        self.assertLess(voltage_capacitance_and_g_leak_rmse_mV, voltage_rmse_mV)
+        self.assertAlmostEqual(
+            0.013165601311057193,
+            fitted_capacitance_nF,
+            places=10,
+        )
+        self.assertAlmostEqual(
+            3.055562695115585,
+            fitted_g_leak_nS,
+            places=9,
+        )
+        self.assertAlmostEqual(
+            58.94230352337091,
+            voltage_rmse_mV,
+            places=9,
+        )
+        self.assertAlmostEqual(
+            1.036196218749666,
+            voltage_capacitance_and_g_leak_rmse_mV,
+            places=9,
+        )
+
+        metrics = json.loads(metrics_path.read_text())
+        self.assertAlmostEqual(
+            0.6428180527203715,
+            metrics["fitted_voltage_error"]["mae_mV"],
+            places=10,
+        )
+        self.assertAlmostEqual(
+            2.9939038646614975,
+            metrics["fitted_voltage_error"]["max_abs_error_mV"],
+            places=10,
+        )
+        self.assertAlmostEqual(
+            56.72806931158854,
+            metrics["reduced_axial_voltage_error"]["rmse_mV"],
+            places=10,
+        )
 
         show_plots_non_blocking()
