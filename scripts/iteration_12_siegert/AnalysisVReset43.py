@@ -3,7 +3,6 @@ import unittest
 import matplotlib.pyplot as plt
 import numpy as np
 from brian2 import mV, Hz, Quantity, volt
-from joblib import Parallel, delayed
 from scipy.optimize import fsolve
 from tqdm.auto import tqdm
 
@@ -14,7 +13,7 @@ from iteration_12_siegert.SolutionByLine import plot_two_rates_and_delta_solutio
     fit_mu_and_sigma_two_rates_and_delta_mu
 from iteration_12_transfer_function_of_lif_neurons.SiegertGradientDescent import SiegertGradients
 from iteration_12_transfer_function_of_lif_neurons.config import DiffusionLIFConfig, default_diffusion_lif_config
-from thesis.Chapter_2 import Chapter2Figures
+from scripts.iteration_12_siegert.Chapter_2 import Chapter2Figures
 
 def solve_one_config(index, config, delta_mu):
     _, _, mu, sigma = solve_for_two_rates(

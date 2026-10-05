@@ -5,20 +5,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 from brian2 import mV, Hz, Quantity
 
-from Plotting import show_plots_non_blocking, prepare_bigger_fonts
-from iteration_12_siegert.CorrelationSimulations import label_for_float
-from iteration_12_siegert.GraphicalSolutions import compute_intersection, plot_two_rates_and_one_gain, \
-    SolveByGraphicalSolutionScripts
-from iteration_12_transfer_function_of_lif_neurons.LookForAllSolutionsMuSigma import \
-    mu_to_sigma_for_constant_rate, plot_line_computation_vs_fit, mu_to_sigma_for_constant_gain, \
-    sigma_to_mu_for_constant_rate
-from iteration_12_transfer_function_of_lif_neurons.SiegerGradientDescentTestCases import \
-    compute_LIF_curves_for_mus_sigmas
-from iteration_12_transfer_function_of_lif_neurons.SiegertGradientDescent import SiegertGradients, \
-    newton_fsolve_find_mu_for_fixed_sigma, I_mu_sigma, integration_limits
-from iteration_12_transfer_function_of_lif_neurons.config import default_diffusion_lif_config, DiffusionLIFConfig, \
-    LifParamFittingProblem
-
 rate_palmer_control = 0.18 * Hz
 rate_palmer_mk_801 = 0.05 * Hz
 

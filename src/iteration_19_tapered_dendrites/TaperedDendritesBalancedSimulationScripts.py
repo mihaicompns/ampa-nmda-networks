@@ -7,15 +7,20 @@ repository, while keeping them outside automated test discovery.
 """
 
 import argparse
+import csv
 import itertools
 import sys
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 from brian2 import Hz, second, um
 from brian2.units import ms, meter
 from brian2.units.allunits import pampere
 from joblib import Parallel, delayed
+from scipy.sparse import diags
 from scipy.stats import expon, uniform
 
 
@@ -29,6 +34,7 @@ if str(SRC_ROOT) not in sys.path:
 from src.iteration_19_tapered_dendrites.conical_data import create_delta_pulses
 from src.iteration_19_tapered_dendrites.data import to_SI
 from src.iteration_19_tapered_dendrites.TaperredDendritesPDE import (
+    crank_nicolson,
     default_params,
     simulate_crank_nicolson_unitless_closed_tapered_cylinder,
 )
@@ -70,6 +76,342 @@ def run_one_spike_position_sweep():
         )
         for event in events
     )
+
+
+def _build_conical_crank_nicolson_matrix(p):
+    x = p.x
+    dx = p.dx
+    tau = p.tau
+    a = p.a()
+    b = p.b(x)
+
+    lower = b[1:] / dx ** 2 + a / (2 * dx)
+    main = -1 / tau - 2 * b / dx ** 2
+    upper = b[:-1] / dx ** 2 - a / (2 * dx)
+
+    return diags(
+        diagonals=[lower, main, upper],
+        offsets=[-1, 0, 1],
+        format="lil",
+    )
+
+
+def _build_cylindrical_crank_nicolson_matrix(p):
+    dx = p.dx
+    tau = p.tau
+    a = 0.0
+    b = np.full(len(p.x), p.b)
+
+    lower = b[1:] / dx ** 2 + a / (2 * dx)
+    main = -1 / tau - 2 * b / dx ** 2
+    upper = b[:-1] / dx ** 2 - a / (2 * dx)
+
+    return diags(
+        diagonals=[lower, main, upper],
+        offsets=[-1, 0, 1],
+        format="lil",
+    )
+
+
+def simulate_single_epsp_trace(p, input_x, input_t, t_max, saved_frames):
+    events = np.array([[input_t], [input_x]])
+    V0 = np.zeros(len(p.x))
+    A = _build_conical_crank_nicolson_matrix(p)
+    times, V_s = crank_nicolson(
+        t_span=(0, t_max),
+        V0=V0,
+        A=A,
+        saved_frames=saved_frames,
+        p=p,
+        events=events,
+        verbose=False,
+    )
+    return times, V_s, events
+
+
+def simulate_single_cylindrical_epsp_trace(p, input_x, input_t, t_max, saved_frames):
+    events = np.array([[input_t], [input_x]])
+    V0 = np.zeros(len(p.x))
+    A = _build_cylindrical_crank_nicolson_matrix(p)
+    times, V_s = crank_nicolson(
+        t_span=(0, t_max),
+        V0=V0,
+        A=A,
+        saved_frames=saved_frames,
+        p=p,
+        events=events,
+        verbose=False,
+    )
+    return times, V_s, events
+
+
+def run_single_input_local_epsp_summary(
+        output_root=Path("saved_simulations") / "one_spike_position_epsp",
+        L=to_SI(500 * um),
+        N=101,
+        dt=to_SI(1e-8 * second),
+        t_max=to_SI(0.3 * ms),
+        input_t=to_SI(0.1 * ms),
+        input_positions_um=(50, 100, 150, 250, 350, 450),
+        I_e=to_SI(15 * pampere),
+        saved_frames=3 * 10 ** 4,
+        output_stem="single_input_local_epsp_summary"):
+    """
+    Run one excitatory input at several cone positions and summarize the local EPSP.
+
+    The key readout is the peak EPSP at the input node compared with fixed
+    proximal and distal readout sites. This makes the local amplification visible
+    in one reproducible figure instead of several independent simulation plots.
+    """
+    output_root = Path(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    p = default_params.with_SI_properties(
+        dt=dt,
+        N=N,
+        L=L,
+        I_e=I_e,
+    ).to_numerical()
+
+    x_um = p.x * meter / um
+    times_by_position = {}
+    voltages_by_position = {}
+    summary_rows = []
+
+    soma_index = 0
+    distal_index = len(p.x) - 1
+
+    for input_position_um in input_positions_um:
+        input_x = to_SI(input_position_um * um)
+        input_index = int(np.argmin(np.abs(p.x - input_x)))
+        times, V_s, events = simulate_single_epsp_trace(
+            p=p,
+            input_x=input_x,
+            input_t=input_t,
+            t_max=t_max,
+            saved_frames=saved_frames,
+        )
+
+        voltage_mV = V_s * 1000.0
+        local_peak_mV = float(np.max(voltage_mV[:, input_index]))
+        soma_peak_mV = float(np.max(voltage_mV[:, soma_index]))
+        distal_peak_mV = float(np.max(voltage_mV[:, distal_index]))
+        global_peak_mV = float(np.max(voltage_mV))
+        global_peak_index = int(np.argmax(np.max(voltage_mV, axis=0)))
+        strongest_remote_mV = max(soma_peak_mV, distal_peak_mV)
+
+        times_by_position[str(input_position_um)] = times
+        voltages_by_position[str(input_position_um)] = voltage_mV
+        summary_rows.append({
+            "input_position_um": float(input_position_um),
+            "nearest_grid_position_um": float(x_um[input_index]),
+            "local_peak_mV": local_peak_mV,
+            "soma_peak_mV": soma_peak_mV,
+            "distal_peak_mV": distal_peak_mV,
+            "global_peak_mV": global_peak_mV,
+            "global_peak_position_um": float(x_um[global_peak_index]),
+            "local_over_strongest_endpoint": (
+                local_peak_mV / strongest_remote_mV
+                if strongest_remote_mV != 0.0 else np.inf
+            ),
+        })
+
+    csv_path = output_root / "summary.csv"
+    with csv_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(summary_rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(summary_rows)
+
+    npz_path = output_root / f"{output_stem}.npz"
+    np.savez_compressed(
+        npz_path,
+        x_um=x_um,
+        input_positions_um=np.asarray(input_positions_um, dtype=float),
+        summary=np.asarray([[row[key] for key in summary_rows[0]] for row in summary_rows], dtype=float),
+        summary_columns=np.asarray(list(summary_rows[0].keys())),
+        **{f"times_{key}um": value for key, value in times_by_position.items()},
+        **{f"voltage_mV_{key}um": value for key, value in voltages_by_position.items()},
+    )
+
+    figure_path = output_root / f"{output_stem}.png"
+    _plot_single_input_local_epsp_summary(
+        figure_path=figure_path,
+        p=p,
+        x_um=x_um,
+        summary_rows=summary_rows,
+        times_by_position=times_by_position,
+        voltages_by_position=voltages_by_position,
+        geometry_label="conical",
+    )
+
+    print(f"Wrote {csv_path}")
+    print(f"Wrote {npz_path}")
+    print(f"Wrote {figure_path}")
+    return summary_rows
+
+
+def run_single_input_local_epsp_cylinder_summary(
+        output_root=Path("saved_simulations") / "one_spike_position_epsp_cylinder",
+        L=to_SI(500 * um),
+        N=101,
+        dt=to_SI(1e-8 * second),
+        t_max=to_SI(0.3 * ms),
+        input_t=to_SI(0.1 * ms),
+        input_positions_um=(50, 100, 150, 250, 350, 450),
+        I_e=to_SI(15 * pampere),
+        saved_frames=3 * 10 ** 4,
+        output_stem="single_input_local_epsp_summary"):
+    output_root = Path(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    conical_parameters = default_params.with_SI_properties(
+        dt=dt,
+        N=N,
+        L=L,
+        I_e=I_e,
+    )
+    p = conical_parameters.to_numerical().to_numerical_cylindrical_params(x0=0.0)
+
+    x_um = p.x * meter / um
+    times_by_position = {}
+    voltages_by_position = {}
+    summary_rows = []
+
+    soma_index = 0
+    distal_index = len(p.x) - 1
+
+    for input_position_um in input_positions_um:
+        input_x = to_SI(input_position_um * um)
+        input_index = int(np.argmin(np.abs(p.x - input_x)))
+        times, V_s, events = simulate_single_cylindrical_epsp_trace(
+            p=p,
+            input_x=input_x,
+            input_t=input_t,
+            t_max=t_max,
+            saved_frames=saved_frames,
+        )
+
+        voltage_mV = V_s * 1000.0
+        local_peak_mV = float(np.max(voltage_mV[:, input_index]))
+        soma_peak_mV = float(np.max(voltage_mV[:, soma_index]))
+        distal_peak_mV = float(np.max(voltage_mV[:, distal_index]))
+        global_peak_mV = float(np.max(voltage_mV))
+        global_peak_index = int(np.argmax(np.max(voltage_mV, axis=0)))
+        strongest_remote_mV = max(soma_peak_mV, distal_peak_mV)
+
+        times_by_position[str(input_position_um)] = times
+        voltages_by_position[str(input_position_um)] = voltage_mV
+        summary_rows.append({
+            "input_position_um": float(input_position_um),
+            "nearest_grid_position_um": float(x_um[input_index]),
+            "local_peak_mV": local_peak_mV,
+            "soma_peak_mV": soma_peak_mV,
+            "distal_peak_mV": distal_peak_mV,
+            "global_peak_mV": global_peak_mV,
+            "global_peak_position_um": float(x_um[global_peak_index]),
+            "local_over_strongest_endpoint": (
+                local_peak_mV / strongest_remote_mV
+                if strongest_remote_mV != 0.0 else np.inf
+            ),
+        })
+
+    csv_path = output_root / "summary.csv"
+    with csv_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(summary_rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(summary_rows)
+
+    npz_path = output_root / f"{output_stem}.npz"
+    np.savez_compressed(
+        npz_path,
+        x_um=x_um,
+        input_positions_um=np.asarray(input_positions_um, dtype=float),
+        summary=np.asarray([[row[key] for key in summary_rows[0]] for row in summary_rows], dtype=float),
+        summary_columns=np.asarray(list(summary_rows[0].keys())),
+        **{f"times_{key}um": value for key, value in times_by_position.items()},
+        **{f"voltage_mV_{key}um": value for key, value in voltages_by_position.items()},
+    )
+
+    figure_path = output_root / f"{output_stem}.png"
+    _plot_single_input_local_epsp_summary(
+        figure_path=figure_path,
+        p=p,
+        x_um=x_um,
+        summary_rows=summary_rows,
+        times_by_position=times_by_position,
+        voltages_by_position=voltages_by_position,
+        geometry_label="cylindrical",
+    )
+
+    print(f"Wrote {csv_path}")
+    print(f"Wrote {npz_path}")
+    print(f"Wrote {figure_path}")
+    return summary_rows
+
+
+def run_single_input_local_epsp_2000um_summary():
+    return run_single_input_local_epsp_summary(
+        output_root=Path("saved_simulations") / "one_spike_position_epsp_2000um_conical",
+        L=to_SI(2000 * um),
+        N=201,
+        input_positions_um=(200, 400, 600, 1000, 1400, 1800, 1900, 1950),
+        output_stem="single_input_local_epsp_conical_2000um",
+    )
+
+
+def run_single_input_local_epsp_cylinder_2000um_summary():
+    return run_single_input_local_epsp_cylinder_summary(
+        output_root=Path("saved_simulations") / "one_spike_position_epsp_2000um_cylinder",
+        L=to_SI(2000 * um),
+        N=201,
+        input_positions_um=(200, 400, 600, 1000, 1400, 1800, 1900, 1950),
+        output_stem="single_input_local_epsp_cylinder_2000um",
+    )
+
+
+def _plot_single_input_local_epsp_summary(
+        figure_path, p, x_um, summary_rows, times_by_position, voltages_by_position,
+        geometry_label):
+    positions = [row["input_position_um"] for row in summary_rows]
+    local_peaks = [row["local_peak_mV"] for row in summary_rows]
+    soma_peaks = [row["soma_peak_mV"] for row in summary_rows]
+    distal_peaks = [row["distal_peak_mV"] for row in summary_rows]
+    fig, axes = plt.subplots(3, 1, figsize=(10, 11), constrained_layout=True)
+
+    trace_axis = axes[0]
+    for row in summary_rows:
+        key = str(int(row["input_position_um"]) if row["input_position_um"].is_integer() else row["input_position_um"])
+        times_ms = times_by_position[key] * second / ms
+        voltage_mV = voltages_by_position[key]
+        local_index = int(np.argmin(np.abs(x_um - row["nearest_grid_position_um"])))
+        trace_axis.plot(
+            times_ms,
+            voltage_mV[:, local_index],
+            label=f"{row['nearest_grid_position_um']:.0f} um",
+        )
+    trace_axis.set_title(f"Local EPSP trace for one input at different {geometry_label} positions")
+    trace_axis.set_xlabel("t [ms]")
+    trace_axis.set_ylabel("V at input [mV]")
+    trace_axis.legend(title="input x", ncols=3)
+
+    peak_axis = axes[1]
+    peak_axis.plot(positions, local_peaks, "o-", label="local at input")
+    peak_axis.plot(positions, soma_peaks, "s--", label="proximal endpoint")
+    peak_axis.plot(positions, distal_peaks, "^--", label="distal endpoint")
+    peak_axis.set_title("Peak EPSP depends on where the same input lands")
+    peak_axis.set_xlabel("input position [um]")
+    peak_axis.set_ylabel("peak V [mV]")
+    peak_axis.legend()
+
+    geometry_axis = axes[2]
+    geometry_axis.plot(positions, local_peaks, "o-", color="tab:red", label="local peak at input")
+    geometry_axis.set_title("Non-normalized local EPSP peak")
+    geometry_axis.set_xlabel("x [um]")
+    geometry_axis.set_ylabel("local peak V [mV]")
+    geometry_axis.legend(loc="upper right")
+
+    fig.savefig(figure_path, dpi=200)
+    plt.close(fig)
 
 
 def run_uniform_excitatory_spike_train():
@@ -337,6 +679,10 @@ def test_run_balanced_limit_sweep_1500um(t_max=to_SI(0.001 * second)):
     
 
 SCENARIOS = {
+    "single-input-local-epsp": run_single_input_local_epsp_summary,
+    "single-input-local-epsp-cylinder": run_single_input_local_epsp_cylinder_summary,
+    "single-input-local-epsp-2000um": run_single_input_local_epsp_2000um_summary,
+    "single-input-local-epsp-cylinder-2000um": run_single_input_local_epsp_cylinder_2000um_summary,
     "one-spike-sweep": run_one_spike_position_sweep,
     "uniform-excitatory": run_uniform_excitatory_spike_train,
     "balanced-static": run_balanced_static_example,

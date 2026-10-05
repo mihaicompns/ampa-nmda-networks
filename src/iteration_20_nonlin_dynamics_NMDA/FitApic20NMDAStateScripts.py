@@ -38,13 +38,13 @@ class NMDASStateFitResult:
     optimizer_message: str
 
 
-def compute_nmda_sigma_from_animation(v_mV):
+def sigma_nmda_block(v_mV):
     return 1.0 / (1.0 + 0.25 * np.exp(-0.08 * np.asarray(v_mV, dtype=float)))
 
 
 def reconstruct_normalized_s_from_g_nmda(reference):
     reference_g_nmda_max_nS = float(reference.metadata["gmaxnmda"])
-    sigma = compute_nmda_sigma_from_animation(reference.v_local_mV)
+    sigma = sigma_nmda_block(reference.v_local_mV)
     return reference.g_nmda_nS / (reference_g_nmda_max_nS * sigma)
 
 
@@ -153,7 +153,7 @@ def simulate_nmda_state_fit_outputs(
     e_leak_mV,
     e_excitatory_mV,
 ):
-    sigma = compute_nmda_sigma_from_animation(reference.v_local_mV)
+    sigma = sigma_nmda_block(reference.v_local_mV)
     fitted_g_nmda_max_nS = _least_squares_scale(
         basis=sigma[fit_mask] * simulation["s"][fit_mask],
         target=reference.g_nmda_nS[fit_mask],
@@ -292,7 +292,7 @@ def simulate_voltage_from_nmda_state(
         if step == len(t_ms) - 1:
             break
 
-        sigma = float(compute_nmda_sigma_from_animation(v_current_mV))
+        sigma = float(sigma_nmda_block(v_current_mV))
         leak_pA = float(g_leak_nS) * (v_current_mV - float(e_leak_mV))
         nmda_pA = (
             float(g_nmda_max_nS)
@@ -511,7 +511,7 @@ def simulate_voltage_from_nmda_state_subtracting_axial_current(
         if step == len(t_ms) - 1:
             break
 
-        sigma = float(compute_nmda_sigma_from_animation(v_current_mV))
+        sigma = float(sigma_nmda_block(v_current_mV))
         leak_pA = float(g_leak_nS) * (v_current_mV - float(e_leak_mV))
         nmda_pA = (
             float(g_nmda_max_nS)

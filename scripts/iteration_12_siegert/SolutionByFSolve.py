@@ -1,18 +1,11 @@
-import math
 import unittest
 
 import matplotlib.pyplot as plt
-import numpy as np
 from brian2 import mV, Hz, Quantity, is_dimensionless, volt
-from loguru import logger
 
 from Plotting import prepare_bigger_fonts, show_plots_non_blocking
-from iteration_12_siegert.CorrelationSimulations import label_for_float
-from iteration_12_transfer_function_of_lif_neurons.LookForAllSolutionsMuSigma import \
-    compute_sigma_necessary_for_given_rate_and_mean, mu_to_sigma_for_constant_rate, MuToSigmaResult
 from iteration_12_transfer_function_of_lif_neurons.SiegertGradientDescent import SiegertGradients
 from iteration_12_transfer_function_of_lif_neurons.config import DiffusionLIFConfig, default_diffusion_lif_config
-from thesis.Chapter_2 import Chapter2Figures
 
 import numpy as np
 from scipy.optimize import fsolve

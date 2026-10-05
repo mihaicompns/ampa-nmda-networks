@@ -8,6 +8,7 @@ import sys
 from loguru import logger
 
 from iteration_12_transfer_function_of_lif_neurons.config import default_diffusion_lif_config, DiffusionLIFConfig
+from scripts.iteration_8_compute_mean_steady_state.scripts_with_wang_numbers import palmer_control
 
 logger.remove()  # remove default handler
 logger.add(sys.stderr, level="INFO")
@@ -27,7 +28,6 @@ from iteration_12_transfer_function_of_lif_neurons.SiegertGradientDescent import
     SiegertGradientDescent,
     SiegertGradients, )
 from iteration_7_one_compartment_step_input.Configuration_with_Up_Down_States import NeuronModelParams
-from iteration_8_compute_mean_steady_state.scripts_with_wang_numbers import palmer_control
 
 
 def d_sigma_over_d_mu(mu_v, sigma_v, siegert_gradients: SiegertGradients):

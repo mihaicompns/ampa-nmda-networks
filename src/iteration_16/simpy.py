@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 import sympy as sp
 from brian2 import nS, mV, nF, second
@@ -30,10 +31,16 @@ def bind_config_to_sympy_values(cfg):
 solutions_file_name = "solutions/solutions.txt"
 polynomial_file_name = "polynomial.txt"
 
+def module_file_path(file_name: str):
+    file_path = Path(file_name)
+    if file_path.is_absolute():
+        return file_path
+    return Path(__file__).parent / file_path
+
 def load_solutions(config: ConductanceDiffusionSimulationConfig, file_name: str = solutions_file_name, load_negative_values = False):
     eqs = RichardsonSympyEquations()
 
-    with open(file_name) as f:
+    with open(module_file_path(file_name)) as f:
         solutions = sp.sympify(f.read())
 
         values = bind_config_to_sympy_values(config)
@@ -208,13 +215,13 @@ class SimpyTest(unittest.TestCase):
             print(sp.latex(num, order='grlex'))
             print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
 
-        with open(polynomial_file_name, "w") as f:
+        with open(module_file_path(polynomial_file_name), "w") as f:
             f.write(sp.srepr(poly.as_expr()))
 
         sol = sp.solve(num, x, domain=Reals)
         print(sol)
 
-        with open(solutions_file_name, "w") as f:
+        with open(module_file_path(solutions_file_name), "w") as f:
             f.write(sp.srepr(sol))
 
 
@@ -239,7 +246,7 @@ class SimpyTest(unittest.TestCase):
         y_expr = sp.solve(equation_e_0, y)[0]
 
         #with open("solution.txt") as f:
-        with open(solutions_file_name) as f:
+        with open(module_file_path(solutions_file_name)) as f:
             solutions = sp.sympify(f.read())
             cfg = config_with_weak_synapses
 
@@ -333,7 +340,7 @@ class SimpyTest(unittest.TestCase):
     def test_see_why_wang_solutions_have_large_imaginary_parts(self):
         config = wang_config_recurrent_synapses
 
-        with open("solution.txt") as f:
+        with open(module_file_path(solutions_file_name)) as f:
             solutions = sp.sympify(f.read())
 
             values = bind_config_to_sympy_values(config)

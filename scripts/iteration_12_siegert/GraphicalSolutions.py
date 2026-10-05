@@ -432,4 +432,5 @@ class SolveByGraphicalSolutionScripts(unittest.TestCase):
     def test_fit_new_rates(self):
         rate_mk801_real = 0.05 * Hz / 0.59
         rate_control_real = 0.18 * Hz / 0.66
+        self.test_solve_graphical_for_two_rates(rates = [0.05* Hz, 0.18 * Hz])
         self.test_solve_graphical_for_two_rates(rates = [rate_mk801_real, rate_control_real])
