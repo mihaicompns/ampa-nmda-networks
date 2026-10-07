@@ -34,8 +34,7 @@ def find_solution_by_double_binary_search(rate_mk801: Quantity = 0.05 * Hz, rate
     sg = SiegertGradients.for_lif_config(lif_config)
 
 
-    def find_delta_sigma(current_mu: Quantity, delta_sigma: Quantity, lower_state: MuSigmaBinarySearchState,
-                         upper_state: Quantity) -> Quantity:
+    def find_delta_sigma(current_mu: Quantity) -> Quantity:
 
         sigma_control = compute_sigma_necessary_for_given_rate_and_mean(current_mu + delta_mu, r_target=rate_control,
                                                                         lif_config=lif_config)
@@ -52,7 +51,7 @@ def find_solution_by_double_binary_search(rate_mk801: Quantity = 0.05 * Hz, rate
         mu, _ = binary_search_for_target_value_precission_in_result_space(
             lower_value=-41 * mV,
             upper_value=-70 * mV,
-            func=lambda m: find_delta_sigma(current_mu=m, lower_state=None, upper_state=None),
+            func=lambda m: find_delta_sigma(current_mu=m),
             target_result=0 * mV,
             precision=1e-10 * mV,
             max_iters=100
@@ -132,6 +131,11 @@ class MyTestCase(unittest.TestCase):
 
         print(f"MK801 rate: {sg.firing_rate(mu, sigma)}. Control firing rate: {sg.firing_rate(mu + delta_mu, sigma)}")
 
+    def test_double_binary_search_tau_m_20(self):
+        tau_m_20_config = default_diffusion_lif_config.with_property(DiffusionLIFConfig.KEY_TAU_MEMBRANE, 20)
+        # (-46.75153051 * mvolt, 1.77489008 * mvolt)
+        print(find_solution_by_double_binary_search(lif_config=tau_m_20_config))
+
     def test_brentq_search(self):
 
         rate_mk801 = 0.05 * Hz
@@ -193,10 +197,6 @@ class MyTestCase(unittest.TestCase):
             print(np.nan)
 
         print(result.root)
-
-
-
-
 
 
     def test_newton_finds_correct_sigma_close_to_minus_40_1(self):

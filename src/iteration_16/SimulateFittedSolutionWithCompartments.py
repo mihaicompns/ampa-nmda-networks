@@ -8,6 +8,7 @@ from joblib import Parallel, delayed
 
 from brian2 import BrianLogger
 
+from iteration_16.model import config_with_tau_m_10, config_with_tau_m_20
 from src.Plotting import prepare_bigger_fonts, show_plots_non_blocking
 from src.iteration_16.Preliminaries import compute_nmda_dv
 from src.iteration_16.model import ConductanceDiffusionSimulationConfig, MeanfieldScaling, config_with_weak_synapses, \
@@ -63,6 +64,31 @@ class CompartmentSimulationsWithFittedSolution(unittest.TestCase):
             self.assertAlmostEqual(gamma, object_under_test.g_i0() / object_under_test.g_e0())
 
             print(object_under_test.r_e)
+            print("tau membrane is: ", object_under_test.tau)
+
+    def test_config_for_weak_configuration_loads_tau_m_20(self):
+        cfg = config_with_tau_m_10.with_property(N_E=1000)
+        solutions = load_solutions(config=cfg)
+        print(solutions)
+
+        for gr, gamma in solutions:
+            print(gr, gamma)
+            object_under_test = cfg.with_fitted_solution(gr, gamma)
+            self.assertAlmostEqual(gamma, object_under_test.g_i0() / object_under_test.g_e0())
+
+            print(object_under_test.r_e)
+            print("tau membrane is: ", object_under_test.tau_m())
+            print("tau 0 is: ", object_under_test.tau_0())
+
+        cfg = config_with_tau_m_20.with_property(N_E=1000)
+        for gr, gamma in solutions:
+            object_under_test = cfg.with_fitted_solution(gr, gamma)
+            self.assertAlmostEqual(gamma, object_under_test.g_i0() / object_under_test.g_e0())
+
+            print(object_under_test.r_e)
+            print("tau membrane is: ", object_under_test.tau_m())
+            print("tau 0 is: ", object_under_test.tau_0())
+
 
     def test_for_albert(self):
         cfg = config_with_weak_synapses.with_property(N_E=10, simulation_time = 2 * second, seed=200, r_e=5 * Hz, r_i=5 * Hz)

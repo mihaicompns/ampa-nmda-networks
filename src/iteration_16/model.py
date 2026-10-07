@@ -52,6 +52,7 @@ class Results:
 
 
 chapter1Results = Results(mu_v=- 47.61595645 * mV, sigma_v=1.9 * mV)
+chapter1Result_tau_m_20_ms = Results(mu_v=-46.75153051 * mV, sigma_v=1.77489008 * mV)
 
 from enum import Enum
 class MeanfieldScaling(Enum):
@@ -142,6 +143,12 @@ class ConductanceDiffusionSimulationConfig:
         elif self.scaling == MeanfieldScaling.STRONG:
             return self.g_nmda_max / (math.sqrt(self.k_comp))
 
+    def tau_m(self):
+        return self.membrane_capacitance / self.g_L
+
+    def tau_0(self):
+        return self.membrane_capacitance / (self.g_L + self.g_e0() + self.g_i0())
+
     def with_property(self, **changes):
 
         if "k" in changes and ("N_E" or "N_I") in changes:
@@ -204,6 +211,23 @@ class ConductanceDiffusionSimulationConfig:
         rate_i = q * rate_e
         return self.with_property(r_e=rate_e, r_i=rate_i)
 
+config_with_tau_m_10 = ConductanceDiffusionSimulationConfig(
+    g_L = 50 * nS,
+    w_ampa=2.399104714393616 * nS,
+    w_gaba=5.077383026480675 * nS,
+    g_nmda_max=4.074575871229172 * nS,
+    N_E=1,
+    N_I=1,
+)
+
+config_with_tau_m_20 = ConductanceDiffusionSimulationConfig(
+    g_L = 25 * nS,
+    w_ampa=2.399104714393616 * nS,
+    w_gaba=5.077383026480675 * nS,
+    g_nmda_max=4.074575871229172 * nS,
+    N_E=1,
+    N_I=1,
+)
 
 config_with_weak_synapses = ConductanceDiffusionSimulationConfig(
     w_ampa=2.399104714393616 * nS,

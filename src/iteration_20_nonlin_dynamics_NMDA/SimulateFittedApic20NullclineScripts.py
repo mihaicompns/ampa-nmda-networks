@@ -122,6 +122,8 @@ FRAME_COUNT = 140
 FPS = 14
 E_LEAK_MV = -70.0
 E_EXCITATORY_MV = 0.0
+STABLE_FIXED_POINT_MARKERSIZE = 10
+UNSTABLE_FIXED_POINT_MARKERSIZE = 12
 
 
 @dataclass(frozen=True)
@@ -596,20 +598,38 @@ def max_reference_empirical_dvdt_time_ms(reference, t_min_ms=T_MIN_MS, t_max_ms=
 
 
 def create_fitted_nullcline_figure():
-    fig, axes = plt.subplots(
-        nrows=2,
-        ncols=3,
-        figsize=(14, 8),
+    fig, axes = plt.subplot_mosaic(
+        [
+            ["model_ax", "model_ax", "model_ax"],
+            ["voltage_ax", "g_nmda_ax", "s_ax"],
+            ["nullcline_ax", "nullcline_ax", "nullcline_ax"],
+        ],
+        figsize=(14, 9),
+        height_ratios=[0.8, 1.7, 2.2],
     )
-    return {
-        "fig": fig,
-        "voltage_ax": axes[0, 0],
-        "g_nmda_ax": axes[0, 1],
-        "s_ax": axes[0, 2],
-        "nullcline_ax": axes[1, 0],
-        "dvdt_ax": axes[1, 1],
-        "d2vdt2_ax": axes[1, 2],
-    }
+    axes["fig"] = fig
+    return axes
+
+
+def add_fitted_nullcline_model_text(model_ax):
+    model_ax.axis("off")
+    equations = (
+        r"$C\,\frac{dV}{dt} = -g_L(V-E_L) - g_{\mathrm{NMDA,max}}\,\sigma(V)\,s(t)\,(V-E_E)$"
+        "\n"
+        r"$g_{\mathrm{NMDA}}(t) = g_{\mathrm{NMDA,max}}\,\sigma(V)\,s(t)$"
+        "\n"
+        r"$s(t) = \sum_{t_i \in \{50,70,90\}}\bar{s}"
+        r"\left[\exp\left(-\frac{t-t_i}{\tau_D}\right)"
+        r"-\exp\left(-\frac{t-t_i}{\tau_r}\right)\right]H(t-t_i)$"
+    )
+    model_ax.text(
+        0.5,
+        0.5,
+        equations,
+        ha="center",
+        va="center",
+        fontsize=12,
+    )
 
 
 def configure_fitted_nullcline_axes(axes, trace, parameters, t_min_ms, t_max_ms):
@@ -618,8 +638,6 @@ def configure_fitted_nullcline_axes(axes, trace, parameters, t_min_ms, t_max_ms)
     axes["voltage_ax"].set_xlim(t_min_ms, t_max_ms)
     axes["g_nmda_ax"].set_xlim(t_min_ms, t_max_ms)
     axes["s_ax"].set_xlim(t_min_ms, t_max_ms)
-    axes["dvdt_ax"].set_xlim(t_min_ms, t_max_ms)
-    axes["d2vdt2_ax"].set_xlim(t_min_ms, t_max_ms)
 
     axes["voltage_ax"].set_ylim(
         float(np.min(trace["v_local_mV"][time_mask])) - 3.0,
@@ -636,33 +654,50 @@ def configure_fitted_nullcline_axes(axes, trace, parameters, t_min_ms, t_max_ms)
     )
     axes["s_ax"].set_ylim(0.0, s_max * 1.1)
     axes["nullcline_ax"].set_xlim(-90.0, 20.0)
-    axes["dvdt_ax"].set_ylim(
-        derivative_ylim(trace["empirical_dvdt_mV_per_ms"][time_mask])
-    )
-    axes["d2vdt2_ax"].set_ylim(
-        derivative_ylim(trace["empirical_d2vdt2_mV_per_ms2"][time_mask])
-    )
 
+    add_fitted_nullcline_model_text(axes["model_ax"])
     axes["voltage_ax"].set_title(r"$V(t)$")
     axes["g_nmda_ax"].set_title(r"$g_{\mathrm{NMDA}}(t)$")
     axes["s_ax"].set_title(r"fitted $s(t)$")
-    axes["nullcline_ax"].set_title("local fitted nullcline")
-    axes["dvdt_ax"].set_title(r"simulated $dV/dt$")
-    axes["d2vdt2_ax"].set_title(r"simulated curvature $d^2V/dt^2$")
+    axes["nullcline_ax"].set_title(r"$dV/dt(V; s(t))$")
 
     axes["voltage_ax"].set_ylabel("V [mV]")
     axes["g_nmda_ax"].set_ylabel(r"$g_{\mathrm{NMDA}}$ [nS]")
     axes["s_ax"].set_ylabel("s")
     axes["nullcline_ax"].set_ylabel(r"$dV/dt$ [mV/ms]")
-    axes["dvdt_ax"].set_ylabel(r"$dV/dt$ [mV/ms]")
-    axes["d2vdt2_ax"].set_ylabel(r"$d^2V/dt^2$ [mV/ms$^2$]")
     for ax in axes.values():
-        if ax is axes["fig"]:
+        if ax is axes["fig"] or ax is axes["model_ax"]:
             continue
         ax.set_xlabel("t [ms]" if ax is not axes["nullcline_ax"] else "V [mV]")
     axes["nullcline_ax"].axhline(0.0, color="black", linewidth=1.0)
-    axes["dvdt_ax"].axhline(0.0, color="black", linewidth=1.0)
-    axes["d2vdt2_ax"].axhline(0.0, color="black", linewidth=1.0)
+
+
+def plot_residual_nullcline_fixed_points(ax, v_values_mV, nullcline_dvdt, **kwargs):
+    intersections_mV = estimate_zero_crossings(v_values_mV, nullcline_dvdt)
+    stable_intersections_mV, unstable_intersections_mV = classify_intersection_stability(
+        intersections_mV
+    )
+    stable_artist = ax.plot(
+        stable_intersections_mV,
+        np.zeros_like(stable_intersections_mV),
+        "o",
+        color="black",
+        markerfacecolor="black",
+        markersize=STABLE_FIXED_POINT_MARKERSIZE,
+        linestyle="None",
+        **kwargs,
+    )
+    unstable_artist = ax.plot(
+        unstable_intersections_mV,
+        np.zeros_like(unstable_intersections_mV),
+        "o",
+        color="black",
+        markerfacecolor="none",
+        markersize=UNSTABLE_FIXED_POINT_MARKERSIZE,
+        linestyle="None",
+        **kwargs,
+    )
+    return stable_artist + unstable_artist
 
 
 def generate_fitted_apic20_moving_nullcline_animation(
@@ -727,34 +762,34 @@ def generate_fitted_apic20_moving_nullcline_animation(
             alpha=0.7,
             label=f"spike {spike_index}",
         )
-    axes["dvdt_ax"].plot(
-        t_ms,
-        trace["empirical_dvdt_mV_per_ms"],
-        color="0.75",
-        linewidth=1.0,
-    )
-    axes["d2vdt2_ax"].plot(
-        t_ms,
-        trace["empirical_d2vdt2_mV_per_ms2"],
-        color="0.75",
-        linewidth=1.0,
-    )
     axes["s_ax"].legend(fontsize=7, loc="best")
 
     active_voltage_line, = axes["voltage_ax"].plot([], [], color="tab:blue", linewidth=2.0)
     active_g_line, = axes["g_nmda_ax"].plot([], [], color="tab:green", linewidth=2.0)
     active_s_line, = axes["s_ax"].plot([], [], color="tab:purple", linewidth=2.0)
-    active_dvdt_line, = axes["dvdt_ax"].plot([], [], color="black", linewidth=2.0)
-    active_d2vdt2_line, = axes["d2vdt2_ax"].plot([], [], color="tab:brown", linewidth=2.0)
     nullcline_line, = axes["nullcline_ax"].plot([], [], color="tab:orange", linewidth=2.0)
     voltage_point, = axes["voltage_ax"].plot([], [], "o", color="tab:blue")
     g_point, = axes["g_nmda_ax"].plot([], [], "o", color="tab:green")
     s_point, = axes["s_ax"].plot([], [], "o", color="tab:purple")
-    dvdt_point, = axes["dvdt_ax"].plot([], [], "o", color="black")
-    d2vdt2_point, = axes["d2vdt2_ax"].plot([], [], "o", color="tab:brown")
     nullcline_point, = axes["nullcline_ax"].plot([], [], "o", color="tab:orange")
-    dvdt_time_line = axes["dvdt_ax"].axvline(0.0, color="0.55", linewidth=1.0)
-    d2vdt2_time_line = axes["d2vdt2_ax"].axvline(0.0, color="0.55", linewidth=1.0)
+    stable_fixed_points, = axes["nullcline_ax"].plot(
+        [],
+        [],
+        "o",
+        color="black",
+        markerfacecolor="black",
+        markersize=STABLE_FIXED_POINT_MARKERSIZE,
+        linestyle="None",
+    )
+    unstable_fixed_points, = axes["nullcline_ax"].plot(
+        [],
+        [],
+        "o",
+        color="black",
+        markerfacecolor="none",
+        markersize=UNSTABLE_FIXED_POINT_MARKERSIZE,
+        linestyle="None",
+    )
     nullcline_voltage_line = axes["nullcline_ax"].axvline(
         0.0,
         color="tab:blue",
@@ -769,29 +804,27 @@ def generate_fitted_apic20_moving_nullcline_animation(
         current_g_nmda_nS = float(trace["g_nmda_nS"][index])
         current_s = float(trace["s"][index])
         current_sigma = float(trace["sigma"][index])
-        current_dvdt = float(trace["empirical_dvdt_mV_per_ms"][index])
-        current_d2vdt2 = float(trace["empirical_d2vdt2_mV_per_ms2"][index])
         active_voltage_line.set_data(t_ms[: index + 1], trace["v_local_mV"][: index + 1])
         active_g_line.set_data(t_ms[: index + 1], trace["g_nmda_nS"][: index + 1])
         active_s_line.set_data(t_ms[: index + 1], trace["s"][: index + 1])
-        active_dvdt_line.set_data(
-            t_ms[: index + 1],
-            trace["empirical_dvdt_mV_per_ms"][: index + 1],
-        )
-        active_d2vdt2_line.set_data(
-            t_ms[: index + 1],
-            trace["empirical_d2vdt2_mV_per_ms2"][: index + 1],
-        )
         nullcline_line.set_data(v_values_mV, nullcline_dvdt[frame_number])
         nullcline_value = float(np.interp(current_v_mV, v_values_mV, nullcline_dvdt[frame_number]))
+        intersections_mV = estimate_zero_crossings(v_values_mV, nullcline_dvdt[frame_number])
+        stable_intersections_mV, unstable_intersections_mV = classify_intersection_stability(
+            intersections_mV
+        )
+        stable_fixed_points.set_data(
+            stable_intersections_mV,
+            np.zeros_like(stable_intersections_mV),
+        )
+        unstable_fixed_points.set_data(
+            unstable_intersections_mV,
+            np.zeros_like(unstable_intersections_mV),
+        )
         voltage_point.set_data([current_t_ms], [current_v_mV])
         g_point.set_data([current_t_ms], [current_g_nmda_nS])
         s_point.set_data([current_t_ms], [current_s])
-        dvdt_point.set_data([current_t_ms], [current_dvdt])
-        d2vdt2_point.set_data([current_t_ms], [current_d2vdt2])
         nullcline_point.set_data([current_v_mV], [nullcline_value])
-        dvdt_time_line.set_xdata([current_t_ms, current_t_ms])
-        d2vdt2_time_line.set_xdata([current_t_ms, current_t_ms])
         nullcline_voltage_line.set_xdata([current_v_mV, current_v_mV])
         title.set_text(
             "Fitted APIC20 single-compartment moving nullcline, "
@@ -802,25 +835,19 @@ def generate_fitted_apic20_moving_nullcline_animation(
             f"t={current_t_ms:.1f} ms, V={current_v_mV:.2f} mV, "
             f"g_NMDA(t)={current_g_nmda_nS:.3g} nS, "
             f"s(t)={current_s:.3g}, sigma(V)={current_sigma:.3g}, "
-            f"dV/dt={current_dvdt:.3g} mV/ms, "
-            f"d2V/dt2={current_d2vdt2:.3g} mV/ms^2, "
             f"nullcline dV/dt={nullcline_value:.3g} mV/ms"
         )
         return (
             active_voltage_line,
             active_g_line,
             active_s_line,
-            active_dvdt_line,
-            active_d2vdt2_line,
             nullcline_line,
             voltage_point,
             g_point,
             s_point,
-            dvdt_point,
-            d2vdt2_point,
             nullcline_point,
-            dvdt_time_line,
-            d2vdt2_time_line,
+            stable_fixed_points,
+            unstable_fixed_points,
             nullcline_voltage_line,
             title,
         )
@@ -929,35 +956,8 @@ def plot_snapshot_axes(axes, trace, parameters, index, v_values_mV, nullcline_dv
     nullcline_value = float(np.interp(current_v_mV, v_values_mV, nullcline_dvdt))
     axes["nullcline_ax"].plot(v_values_mV, nullcline_dvdt, color="tab:orange")
     axes["nullcline_ax"].plot(current_v_mV, nullcline_value, "o", color="tab:orange")
+    plot_residual_nullcline_fixed_points(axes["nullcline_ax"], v_values_mV, nullcline_dvdt)
     axes["nullcline_ax"].axvline(current_v_mV, color="tab:blue", linewidth=1.0)
-
-    axes["dvdt_ax"].plot(t_ms, trace["empirical_dvdt_mV_per_ms"], color="0.75", linewidth=1.0)
-    axes["dvdt_ax"].plot(
-        t_ms[: index + 1],
-        trace["empirical_dvdt_mV_per_ms"][: index + 1],
-        color="black",
-    )
-    axes["dvdt_ax"].plot(current_t_ms, trace["empirical_dvdt_mV_per_ms"][index], "o", color="black")
-    axes["dvdt_ax"].axvline(current_t_ms, color="0.55", linewidth=1.0)
-
-    axes["d2vdt2_ax"].plot(
-        t_ms,
-        trace["empirical_d2vdt2_mV_per_ms2"],
-        color="0.75",
-        linewidth=1.0,
-    )
-    axes["d2vdt2_ax"].plot(
-        t_ms[: index + 1],
-        trace["empirical_d2vdt2_mV_per_ms2"][: index + 1],
-        color="tab:brown",
-    )
-    axes["d2vdt2_ax"].plot(
-        current_t_ms,
-        trace["empirical_d2vdt2_mV_per_ms2"][index],
-        "o",
-        color="tab:brown",
-    )
-    axes["d2vdt2_ax"].axvline(current_t_ms, color="0.55", linewidth=1.0)
 
 
 def snapshot_metrics(reference, trace, parameters, index, v_values_mV, nullcline_dvdt):
@@ -983,6 +983,241 @@ def snapshot_metrics(reference, trace, parameters, index, v_values_mV, nullcline
             fitted_v_mV=trace["v_local_mV"],
         ),
     }
+
+
+def snapshot_metrics_from_csv_trace(trace, parameters, index, v_values_mV, nullcline_dvdt):
+    current_v_mV = float(trace["v_local_mV"][index])
+    return {
+        "snapshot_time_ms": float(trace["t_ms"][index]),
+        "snapshot_v_mV": current_v_mV,
+        "snapshot_g_nmda_nS": float(trace["g_nmda_nS"][index]),
+        "snapshot_s": float(trace["s"][index]),
+        "snapshot_x": float(trace["x"][index]),
+        "snapshot_sigma": float(trace["sigma"][index]),
+        "snapshot_empirical_dvdt_mV_per_ms": float(
+            trace["empirical_dvdt_mV_per_ms"][index]
+        ),
+        "snapshot_empirical_d2vdt2_mV_per_ms2": float(
+            trace["empirical_d2vdt2_mV_per_ms2"][index]
+        ),
+        "snapshot_nullcline_dvdt_at_current_v_mV_per_ms": float(
+            np.interp(current_v_mV, v_values_mV, nullcline_dvdt)
+        ),
+        "snapshot_nullcline_intersections_mV": estimate_zero_crossings(
+            v_values_mV,
+            nullcline_dvdt,
+        ).tolist(),
+        "parameters": asdict(parameters),
+    }
+
+
+def generate_fitted_apic20_moving_nullcline_animation_from_trace(
+        metadata,
+        trace,
+        parameters,
+        output_gif_path,
+        frame_count=FRAME_COUNT,
+        fps=FPS,
+        show_plot=False,
+):
+    output_gif_path = Path(output_gif_path)
+    output_gif_path.parent.mkdir(parents=True, exist_ok=True)
+    t_min_ms = float(metadata["t_min_ms"])
+    t_max_ms = float(metadata["t_max_ms"])
+    t_ms = trace["t_ms"]
+    frame_mask = (t_ms >= t_min_ms) & (t_ms <= t_max_ms)
+    candidate_indexes = np.flatnonzero(frame_mask)
+    if len(candidate_indexes) == 0:
+        candidate_indexes = np.arange(len(t_ms))
+    frame_indexes = np.unique(
+        np.linspace(
+            candidate_indexes[0],
+            candidate_indexes[-1],
+            min(frame_count, len(candidate_indexes)),
+            dtype=int,
+        )
+    )
+    v_values_mV = np.linspace(-90.0, 20.0, 500)
+    nullcline_dvdt = [
+        compute_local_nullcline_dvdt_mV_per_ms(
+            parameters,
+            selected_s=trace["s"][index],
+            v_values_mV=v_values_mV,
+        )
+        for index in frame_indexes
+    ]
+
+    axes = create_fitted_nullcline_figure()
+    fig = axes["fig"]
+    configure_fitted_nullcline_axes(axes, trace, parameters, t_min_ms, t_max_ms)
+    axes["nullcline_ax"].set_ylim(derivative_ylim(np.concatenate(nullcline_dvdt)))
+
+    axes["voltage_ax"].plot(t_ms, trace["v_local_mV"], color="0.75", linewidth=1.0)
+    axes["g_nmda_ax"].plot(t_ms, trace["g_nmda_nS"], color="0.75", linewidth=1.0)
+    axes["s_ax"].plot(t_ms, trace["s"], color="0.75", linewidth=1.0)
+    for spike_index, individual_s in enumerate(trace["individual_s"], start=1):
+        axes["s_ax"].plot(
+            t_ms,
+            individual_s,
+            linestyle=":",
+            linewidth=1.0,
+            alpha=0.7,
+            label=f"spike {spike_index}",
+        )
+    axes["s_ax"].legend(fontsize=7, loc="best")
+
+    active_voltage_line, = axes["voltage_ax"].plot([], [], color="tab:blue", linewidth=2.0)
+    active_g_line, = axes["g_nmda_ax"].plot([], [], color="tab:green", linewidth=2.0)
+    active_s_line, = axes["s_ax"].plot([], [], color="tab:purple", linewidth=2.0)
+    nullcline_line, = axes["nullcline_ax"].plot([], [], color="tab:orange", linewidth=2.0)
+    voltage_point, = axes["voltage_ax"].plot([], [], "o", color="tab:blue")
+    g_point, = axes["g_nmda_ax"].plot([], [], "o", color="tab:green")
+    s_point, = axes["s_ax"].plot([], [], "o", color="tab:purple")
+    nullcline_point, = axes["nullcline_ax"].plot([], [], "o", color="tab:orange")
+    stable_fixed_points, = axes["nullcline_ax"].plot(
+        [],
+        [],
+        "o",
+        color="black",
+        markerfacecolor="black",
+        markersize=STABLE_FIXED_POINT_MARKERSIZE,
+        linestyle="None",
+    )
+    unstable_fixed_points, = axes["nullcline_ax"].plot(
+        [],
+        [],
+        "o",
+        color="black",
+        markerfacecolor="none",
+        markersize=UNSTABLE_FIXED_POINT_MARKERSIZE,
+        linestyle="None",
+    )
+    nullcline_voltage_line = axes["nullcline_ax"].axvline(
+        0.0,
+        color="tab:blue",
+        linewidth=1.0,
+    )
+    title = fig.suptitle("")
+
+    def update(frame_number):
+        index = int(frame_indexes[frame_number])
+        current_t_ms = float(t_ms[index])
+        current_v_mV = float(trace["v_local_mV"][index])
+        curve = nullcline_dvdt[frame_number]
+        nullcline_value = float(np.interp(current_v_mV, v_values_mV, curve))
+        intersections_mV = estimate_zero_crossings(v_values_mV, curve)
+        stable_intersections_mV, unstable_intersections_mV = classify_intersection_stability(
+            intersections_mV
+        )
+        active_voltage_line.set_data(t_ms[: index + 1], trace["v_local_mV"][: index + 1])
+        active_g_line.set_data(t_ms[: index + 1], trace["g_nmda_nS"][: index + 1])
+        active_s_line.set_data(t_ms[: index + 1], trace["s"][: index + 1])
+        nullcline_line.set_data(v_values_mV, curve)
+        voltage_point.set_data([current_t_ms], [current_v_mV])
+        g_point.set_data([current_t_ms], [trace["g_nmda_nS"][index]])
+        s_point.set_data([current_t_ms], [trace["s"][index]])
+        nullcline_point.set_data([current_v_mV], [nullcline_value])
+        stable_fixed_points.set_data(
+            stable_intersections_mV,
+            np.zeros_like(stable_intersections_mV),
+        )
+        unstable_fixed_points.set_data(
+            unstable_intersections_mV,
+            np.zeros_like(unstable_intersections_mV),
+        )
+        nullcline_voltage_line.set_xdata([current_v_mV, current_v_mV])
+        title.set_text(
+            f"{metadata['label']}, t={current_t_ms:.1f} ms, "
+            f"V={current_v_mV:.2f} mV, "
+            f"g_NMDA(t)={trace['g_nmda_nS'][index]:.3g} nS, "
+            f"s(t)={trace['s'][index]:.3g}"
+        )
+        return (
+            active_voltage_line,
+            active_g_line,
+            active_s_line,
+            nullcline_line,
+            voltage_point,
+            g_point,
+            s_point,
+            nullcline_point,
+            stable_fixed_points,
+            unstable_fixed_points,
+            nullcline_voltage_line,
+            title,
+        )
+
+    animation = FuncAnimation(
+        fig,
+        update,
+        frames=len(frame_indexes),
+        interval=1000 / fps,
+        blit=False,
+    )
+    fig.subplots_adjust(left=0.06, right=0.98, bottom=0.08, top=0.9, hspace=0.45)
+    animation.save(output_gif_path, writer=PillowWriter(fps=fps))
+    if show_plot:
+        plt.show(block=True)
+    else:
+        plt.close(fig)
+    return output_gif_path
+
+
+def generate_fitted_apic20_moving_nullcline_snapshot_from_trace(
+        metadata,
+        trace,
+        parameters,
+        snapshot_time_ms,
+        output_png_path,
+        show_plot=False,
+):
+    output_png_path = Path(output_png_path)
+    output_png_path.parent.mkdir(parents=True, exist_ok=True)
+    t_ms = trace["t_ms"]
+    index = nearest_trace_index(t_ms, snapshot_time_ms, min_index=1, max_index=len(t_ms) - 2)
+    current_t_ms = float(t_ms[index])
+    v_values_mV = np.linspace(-90.0, 20.0, 5000)
+    nullcline_dvdt = compute_local_nullcline_dvdt_mV_per_ms(
+        parameters,
+        selected_s=trace["s"][index],
+        v_values_mV=v_values_mV,
+    )
+
+    axes = create_fitted_nullcline_figure()
+    fig = axes["fig"]
+    configure_fitted_nullcline_axes(
+        axes,
+        trace,
+        parameters,
+        float(metadata["t_min_ms"]),
+        float(metadata["t_max_ms"]),
+    )
+    axes["nullcline_ax"].set_ylim(derivative_ylim(nullcline_dvdt))
+    plot_snapshot_axes(axes, trace, parameters, index, v_values_mV, nullcline_dvdt)
+    fig.suptitle(
+        f"{metadata['label']}, "
+        f"t={current_t_ms:.1f} ms, "
+        f"V={trace['v_local_mV'][index]:.2f} mV, "
+        f"g_NMDA={trace['g_nmda_nS'][index]:.3g} nS, "
+        f"s={trace['s'][index]:.3g}",
+        y=0.98,
+    )
+    fig.subplots_adjust(left=0.06, right=0.98, bottom=0.08, top=0.9, hspace=0.45)
+    fig.savefig(output_png_path, dpi=300, bbox_inches="tight")
+    if show_plot:
+        fig.show()
+        plt.show(block=True)
+    else:
+        plt.close(fig)
+    snapshot = snapshot_metrics_from_csv_trace(
+        trace,
+        parameters,
+        index,
+        v_values_mV,
+        nullcline_dvdt,
+    )
+    snapshot["plot_path"] = str(output_png_path)
+    return snapshot
 
 
 def generate_fitted_apic20_standard_protocol_outputs(
@@ -2394,11 +2629,6 @@ def create_fitted_apic20_csv_snapshot_slider_figure(
         available_protocol_names=FITTED_APIC20_INTERACTIVE_PROTOCOL_NAMES,
         show_plot=True,
 ):
-    from src.iteration_20_nonlin_dynamics_NMDA.SimulateFittedApic20CurrentNullclineScripts import (
-        compute_current_balance_nullcline_pA,
-        estimate_current_balance_intersections_mV,
-    )
-
     v_values_mV = np.linspace(-90.0, 20.0, 500)
     axes = create_current_like_interactive_figure()
     fig = axes["fig"]
@@ -2444,9 +2674,6 @@ def create_fitted_apic20_csv_snapshot_slider_figure(
             parameters=state["parameters"],
             v_values_mV=v_values_mV,
             residual_cache=state["residual_cache"],
-            current_cache=state["current_cache"],
-            compute_current_balance_nullcline_pA=compute_current_balance_nullcline_pA,
-            estimate_current_balance_intersections_mV=estimate_current_balance_intersections_mV,
             artists=state["artists"],
         )
         state["current_index"] = index
@@ -2475,14 +2702,6 @@ def create_fitted_apic20_csv_snapshot_slider_figure(
                 for index in sample_indexes
             ]
         )
-        sampled_current_curves = [
-            compute_current_balance_nullcline_pA(
-                next_parameters,
-                next_trace["s"][index],
-                v_values_mV,
-            )
-            for index in sample_indexes
-        ]
         for name, ax in axes.items():
             if name != "fig":
                 ax.cla()
@@ -2491,7 +2710,6 @@ def create_fitted_apic20_csv_snapshot_slider_figure(
             next_trace,
             next_metadata,
             sampled_residual_curves,
-            sampled_current_curves,
         )
         plot_interactive_static_axes(axes, next_trace)
         artists = create_interactive_csv_artists(axes, fig, t_ms[0])
@@ -2502,7 +2720,6 @@ def create_fitted_apic20_csv_snapshot_slider_figure(
                 "parameters": next_parameters,
                 "t_ms": t_ms,
                 "residual_cache": {},
-                "current_cache": {},
                 "artists": artists,
             }
         )
@@ -2558,46 +2775,44 @@ def create_interactive_csv_artists(axes, fig, initial_t_ms):
     active_voltage_line, = axes["voltage_ax"].plot([], [], color="tab:blue", linewidth=2.0)
     active_g_line, = axes["g_nmda_ax"].plot([], [], color="tab:green", linewidth=2.0)
     active_s_line, = axes["s_ax"].plot([], [], color="tab:purple", linewidth=2.0)
-    active_dvdt_line, = axes["dvdt_ax"].plot([], [], color="black", linewidth=2.0)
-    active_d2vdt2_line, = axes["d2vdt2_ax"].plot([], [], color="tab:brown", linewidth=2.0)
     residual_line, = axes["nullcline_ax"].plot([], [], color="tab:orange", linewidth=2.0)
-    nmda_line, = axes["current_nullcline_ax"].plot([], [], color="tab:red", linewidth=2.0)
-    leak_line, = axes["current_nullcline_ax"].plot([], [], color="tab:blue", linewidth=2.0)
     time_lines = [
         axes[name].axvline(initial_t_ms, color="0.45", linewidth=1.0)
-        for name in ["voltage_ax", "g_nmda_ax", "s_ax", "dvdt_ax", "d2vdt2_ax"]
+        for name in ["voltage_ax", "g_nmda_ax", "s_ax"]
     ]
     residual_v_line = axes["nullcline_ax"].axvline(initial_t_ms, color="tab:blue", linewidth=1.0)
-    current_v_line = axes["current_nullcline_ax"].axvline(initial_t_ms, color="0.35", linewidth=1.0)
     voltage_point, = axes["voltage_ax"].plot([], [], "o", color="tab:blue")
     g_point, = axes["g_nmda_ax"].plot([], [], "o", color="tab:green")
     s_point, = axes["s_ax"].plot([], [], "o", color="tab:purple")
-    dvdt_point, = axes["dvdt_ax"].plot([], [], "o", color="black")
-    d2vdt2_point, = axes["d2vdt2_ax"].plot([], [], "o", color="tab:brown")
     residual_point, = axes["nullcline_ax"].plot([], [], "o", color="tab:orange")
-    stable_intersection_dots, = axes["current_nullcline_ax"].plot(
-        [], [], "o", color="black", markerfacecolor="black", markersize=10, linestyle="None"
+    stable_intersection_dots, = axes["nullcline_ax"].plot(
+        [],
+        [],
+        "o",
+        color="black",
+        markerfacecolor="black",
+        markersize=STABLE_FIXED_POINT_MARKERSIZE,
+        linestyle="None",
     )
-    unstable_intersection_dots, = axes["current_nullcline_ax"].plot(
-        [], [], "o", color="black", markerfacecolor="none", markersize=12, linestyle="None"
+    unstable_intersection_dots, = axes["nullcline_ax"].plot(
+        [],
+        [],
+        "o",
+        color="black",
+        markerfacecolor="none",
+        markersize=UNSTABLE_FIXED_POINT_MARKERSIZE,
+        linestyle="None",
     )
     return {
         "active_voltage_line": active_voltage_line,
         "active_g_line": active_g_line,
         "active_s_line": active_s_line,
-        "active_dvdt_line": active_dvdt_line,
-        "active_d2vdt2_line": active_d2vdt2_line,
         "residual_line": residual_line,
-        "nmda_line": nmda_line,
-        "leak_line": leak_line,
         "time_lines": time_lines,
         "residual_v_line": residual_v_line,
-        "current_v_line": current_v_line,
         "voltage_point": voltage_point,
         "g_point": g_point,
         "s_point": s_point,
-        "dvdt_point": dvdt_point,
-        "d2vdt2_point": d2vdt2_point,
         "residual_point": residual_point,
         "stable_intersection_dots": stable_intersection_dots,
         "unstable_intersection_dots": unstable_intersection_dots,
@@ -2608,25 +2823,23 @@ def create_interactive_csv_artists(axes, fig, initial_t_ms):
 def create_current_like_interactive_figure():
     fig, axes = plt.subplot_mosaic(
         [
-            ["voltage_ax", "g_nmda_ax"],
-            ["s_ax", "nullcline_ax"],
-            ["dvdt_ax", "d2vdt2_ax"],
-            ["current_nullcline_ax", "current_nullcline_ax"],
+            ["model_ax", "model_ax", "model_ax"],
+            ["voltage_ax", "g_nmda_ax", "s_ax"],
+            ["nullcline_ax", "nullcline_ax", "nullcline_ax"],
         ],
-        figsize=(12, 11),
+        figsize=(14, 9),
+        height_ratios=[0.8, 1.7, 2.2],
     )
     axes["fig"] = fig
     return axes
 
 
-def configure_interactive_csv_axes(axes, trace, metadata, residual_curves, current_curves):
+def configure_interactive_csv_axes(axes, trace, metadata, residual_curves):
     t_ms = trace["t_ms"]
     time_mask = (t_ms >= metadata["t_min_ms"]) & (t_ms <= metadata["t_max_ms"])
-    for name in ["voltage_ax", "g_nmda_ax", "s_ax", "dvdt_ax", "d2vdt2_ax"]:
+    for name in ["voltage_ax", "g_nmda_ax", "s_ax"]:
         axes[name].set_xlim(metadata["t_min_ms"], metadata["t_max_ms"])
     axes["nullcline_ax"].set_xlim(-90.0, 20.0)
-    axes["nullcline_ax"].set_ylim(-10.0, 10.0)
-    axes["current_nullcline_ax"].set_xlim(-90.0, 20.0)
     axes["voltage_ax"].set_ylim(
         float(np.min(trace["v_local_mV"][time_mask])) - 3.0,
         float(np.max(trace["v_local_mV"][time_mask])) + 3.0,
@@ -2636,36 +2849,21 @@ def configure_interactive_csv_axes(axes, trace, metadata, residual_curves, curre
         0.0,
         float(np.max([np.max(trace["s"][time_mask]), np.max(trace["individual_s"][:, time_mask])])) * 1.1,
     )
-    axes["dvdt_ax"].set_ylim(derivative_ylim(trace["empirical_dvdt_mV_per_ms"][time_mask]))
-    axes["d2vdt2_ax"].set_ylim(derivative_ylim(trace["empirical_d2vdt2_mV_per_ms2"][time_mask]))
-    # axes["nullcline_ax"].set_ylim(derivative_ylim(residual_curves))
-    current_values = np.concatenate(
-        [currents["nmda_pA"] for currents in current_curves]
-        + [currents["leak_balance_pA"] for currents in current_curves]
-    )
-    axes["current_nullcline_ax"].set_ylim(derivative_ylim(current_values))
+    axes["nullcline_ax"].set_ylim(derivative_ylim(residual_curves))
+    add_fitted_nullcline_model_text(axes["model_ax"])
     axes["voltage_ax"].set_title(r"$V(t)$")
     axes["g_nmda_ax"].set_title(r"$g_{\mathrm{NMDA}}(t)$")
     axes["s_ax"].set_title(r"fitted $s(t)$")
     axes["nullcline_ax"].set_title(r"$dV/dt(V; s(t))$")
-    axes["dvdt_ax"].set_title(r"simulated $dV/dt$")
-    axes["d2vdt2_ax"].set_title(r"simulated $d^2V/dt^2$")
-    axes["current_nullcline_ax"].set_title(r"$I_{\mathrm{NMDA}}(V,t)=-I_L(V)$")
     axes["voltage_ax"].set_ylabel("V [mV]")
     axes["g_nmda_ax"].set_ylabel(r"$g_{\mathrm{NMDA}}$ [nS]")
     axes["s_ax"].set_ylabel("s")
     axes["nullcline_ax"].set_ylabel(r"$dV/dt$ [mV/ms]")
-    axes["dvdt_ax"].set_ylabel(r"$dV/dt$ [mV/ms]")
-    axes["d2vdt2_ax"].set_ylabel(r"$d^2V/dt^2$ [mV/ms$^2$]")
-    axes["current_nullcline_ax"].set_ylabel("current [pA]")
     for name, ax in axes.items():
-        if name == "fig":
+        if name in {"fig", "model_ax"}:
             continue
         ax.set_xlabel("V [mV]" if "nullcline" in name else "t [ms]")
     axes["nullcline_ax"].axhline(0.0, color="black", linewidth=1.0)
-    axes["dvdt_ax"].axhline(0.0, color="black", linewidth=1.0)
-    axes["d2vdt2_ax"].axhline(0.0, color="black", linewidth=1.0)
-    axes["current_nullcline_ax"].axhline(0.0, color="0.6", linewidth=1.0)
 
 
 def plot_interactive_static_axes(axes, trace):
@@ -2675,13 +2873,6 @@ def plot_interactive_static_axes(axes, trace):
     axes["s_ax"].plot(t_ms, trace["s"], color="0.75", linewidth=1.0)
     for spike_index, individual_s in enumerate(trace["individual_s"], start=1):
         axes["s_ax"].plot(t_ms, individual_s, linestyle=":", linewidth=1.0, alpha=0.7)
-    axes["dvdt_ax"].plot(t_ms, trace["empirical_dvdt_mV_per_ms"], color="0.75", linewidth=1.0)
-    axes["d2vdt2_ax"].plot(
-        t_ms,
-        trace["empirical_d2vdt2_mV_per_ms2"],
-        color="0.75",
-        linewidth=1.0,
-    )
 
 
 def update_interactive_csv_snapshot(
@@ -2691,9 +2882,6 @@ def update_interactive_csv_snapshot(
         parameters,
         v_values_mV,
         residual_cache,
-        current_cache,
-        compute_current_balance_nullcline_pA,
-        estimate_current_balance_intersections_mV,
         artists,
 ):
     t_ms = trace["t_ms"]
@@ -2705,55 +2893,36 @@ def update_interactive_csv_snapshot(
             trace["s"][index],
             v_values_mV,
         )
-    if index not in current_cache:
-        current_cache[index] = compute_current_balance_nullcline_pA(
-            parameters,
-            trace["s"][index],
-            v_values_mV,
-        )
     residual_curve = residual_cache[index]
-    currents = current_cache[index]
     artists["active_voltage_line"].set_data(t_ms[: index + 1], trace["v_local_mV"][: index + 1])
     artists["active_g_line"].set_data(t_ms[: index + 1], trace["g_nmda_nS"][: index + 1])
     artists["active_s_line"].set_data(t_ms[: index + 1], trace["s"][: index + 1])
-    artists["active_dvdt_line"].set_data(t_ms[: index + 1], trace["empirical_dvdt_mV_per_ms"][: index + 1])
-    artists["active_d2vdt2_line"].set_data(
-        t_ms[: index + 1],
-        trace["empirical_d2vdt2_mV_per_ms2"][: index + 1],
-    )
     artists["residual_line"].set_data(v_values_mV, residual_curve)
-    artists["nmda_line"].set_data(v_values_mV, currents["nmda_pA"])
-    artists["leak_line"].set_data(v_values_mV, currents["leak_balance_pA"])
     for line in artists["time_lines"]:
         line.set_xdata([current_t_ms, current_t_ms])
     artists["residual_v_line"].set_xdata([current_v_mV, current_v_mV])
-    artists["current_v_line"].set_xdata([current_v_mV, current_v_mV])
     artists["voltage_point"].set_data([current_t_ms], [current_v_mV])
     artists["g_point"].set_data([current_t_ms], [trace["g_nmda_nS"][index]])
     artists["s_point"].set_data([current_t_ms], [trace["s"][index]])
-    artists["dvdt_point"].set_data([current_t_ms], [trace["empirical_dvdt_mV_per_ms"][index]])
-    artists["d2vdt2_point"].set_data([current_t_ms], [trace["empirical_d2vdt2_mV_per_ms2"][index]])
     artists["residual_point"].set_data(
         [current_v_mV],
         [np.interp(current_v_mV, v_values_mV, residual_curve)],
     )
-    nmda_at_v = float(np.interp(current_v_mV, v_values_mV, currents["nmda_pA"]))
-    leak_at_v = float(np.interp(current_v_mV, v_values_mV, currents["leak_balance_pA"]))
-    intersections_mV = estimate_current_balance_intersections_mV(currents)
-    intersections_pA = np.interp(intersections_mV, v_values_mV, currents["nmda_pA"])
+    intersections_mV = estimate_zero_crossings(v_values_mV, residual_curve)
     stable_intersections_mV, unstable_intersections_mV = classify_intersection_stability(intersections_mV)
     artists["stable_intersection_dots"].set_data(
         stable_intersections_mV,
-        np.interp(stable_intersections_mV, v_values_mV, currents["nmda_pA"]),
+        np.zeros_like(stable_intersections_mV),
     )
     artists["unstable_intersection_dots"].set_data(
         unstable_intersections_mV,
-        np.interp(unstable_intersections_mV, v_values_mV, currents["nmda_pA"]),
+        np.zeros_like(unstable_intersections_mV),
     )
     artists["title"].set_text(
         f"{metadata['label']} | t={current_t_ms:.3f} ms, "
-        f"V={current_v_mV:.3f} mV, s={trace['s'][index]:.4g}, "
-        f"I_NMDA={nmda_at_v:.4g} pA, -I_L={leak_at_v:.4g} pA"
+        f"V={current_v_mV:.3f} mV, "
+        f"g_NMDA={trace['g_nmda_nS'][index]:.4g} nS, "
+        f"s={trace['s'][index]:.4g}"
     )
 
 
@@ -3290,6 +3459,153 @@ FITTED_APIC20_PARALLEL_SCRIPT_METHODS = (
 )
 
 
+def fitted_apic20_existing_plot_regeneration_specs():
+    return (
+        {
+            "protocol_name": "standard_three_spike",
+            "output_dir": FITTED_NULLCLINE_OUTPUT_DIR,
+            "metrics_filename": "fitted_apic20_moving_nullcline_protocol.json",
+            "gif_filename": "fitted_apic20_moving_nullcline.gif",
+            "snapshot_prefix": "fitted_apic20_moving_nullcline",
+        },
+        {
+            "protocol_name": "standard_two_spike",
+            "output_dir": FITTED_NULLCLINE_SPIKE_SNAPSHOT_OUTPUT_DIR,
+            "metrics_filename": "fitted_apic20_spike_time_snapshot_protocol.json",
+            "gif_filename": "fitted_apic20_two_spike_moving_nullcline.gif",
+            "snapshot_prefix": "fitted_apic20_two_spike_moving_nullcline",
+        },
+        {
+            "protocol_name": "standard_three_spike_with_s_saturation",
+            "output_dir": FITTED_NULLCLINE_SATURATING_OUTPUT_DIR,
+            "metrics_filename": "fitted_apic20_moving_nullcline_protocol.json",
+            "gif_filename": "fitted_apic20_moving_nullcline.gif",
+            "snapshot_prefix": "fitted_apic20_moving_nullcline",
+        },
+        {
+            "protocol_name": "standard_two_spike_with_s_saturation",
+            "output_dir": FITTED_NULLCLINE_SATURATING_TWO_SPIKE_OUTPUT_DIR,
+            "metrics_filename": "fitted_apic20_spike_time_snapshot_protocol.json",
+            "gif_filename": "fitted_apic20_two_spike_moving_nullcline.gif",
+            "snapshot_prefix": "fitted_apic20_two_spike_moving_nullcline",
+        },
+        {
+            "protocol_name": "current_balance_three_spike",
+            "output_dir": DEFAULT_OUTPUT_DIR / "fitted_apic20_current_nullcline",
+            "metrics_filename": "fitted_apic20_current_balance_nullcline_protocol.json",
+            "gif_filename": "fitted_apic20_current_balance_nullcline.gif",
+            "snapshot_prefix": "fitted_apic20_current_balance_nullcline",
+        },
+        {
+            "protocol_name": "current_balance_two_spike",
+            "output_dir": DEFAULT_OUTPUT_DIR / "fitted_apic20_current_nullcline_spike_snapshots",
+            "metrics_filename": "fitted_apic20_current_balance_two_spike_protocol.json",
+            "gif_filename": "fitted_apic20_two_spike_current_balance_nullcline.gif",
+            "snapshot_prefix": "fitted_apic20_two_spike_current_balance_nullcline",
+        },
+        {
+            "protocol_name": "current_balance_three_spike_with_s_saturation",
+            "output_dir": DEFAULT_OUTPUT_DIR / "fitted_apic20_current_nullcline_with_s_saturation",
+            "metrics_filename": "fitted_apic20_current_balance_nullcline_protocol.json",
+            "gif_filename": "fitted_apic20_current_balance_nullcline.gif",
+            "snapshot_prefix": "fitted_apic20_current_balance_nullcline",
+        },
+        {
+            "protocol_name": "current_balance_two_spike_with_s_saturation",
+            "output_dir": DEFAULT_OUTPUT_DIR / "fitted_apic20_current_nullcline_with_s_saturation_two_spike",
+            "metrics_filename": "fitted_apic20_current_balance_two_spike_protocol.json",
+            "gif_filename": "fitted_apic20_two_spike_current_balance_nullcline.gif",
+            "snapshot_prefix": "fitted_apic20_two_spike_current_balance_nullcline",
+        },
+    )
+
+
+def existing_snapshot_times_for_regeneration(spec):
+    metrics_path = Path(spec["output_dir"]) / spec["metrics_filename"]
+    if metrics_path.exists():
+        metrics = json.loads(metrics_path.read_text())
+        if "snapshot_times_ms" in metrics:
+            return metrics["snapshot_times_ms"]
+    metadata, trace = read_fitted_apic20_protocol_csv_bundle(spec["protocol_name"])
+    if len(metadata["spike_times_ms"]) == 2:
+        snapshot_times = fitted_apic20_snapshot_times_up_to_ms(
+            TWO_SPIKE_T_MAX_MS,
+            spike_times_ms=metadata["spike_times_ms"],
+        )
+        snapshot_times.update(
+            peak_voltage_snapshot_times_between_spikes_ms(trace, TWO_SPIKE_T_MAX_MS)
+        )
+        return snapshot_times
+    snapshot_times = {
+        "t67ms": 67.0,
+        "t89ms": 89.0,
+        "t97ms": 97.0,
+        "t98ms": 98.0,
+        "t140ms": 140.0,
+    }
+    snapshot_times.update(peak_voltage_snapshot_times_between_spikes_ms(trace, T_MAX_MS))
+    return snapshot_times
+
+
+def regenerate_fitted_apic20_plot_output_from_existing_csv(spec, show_plot=False):
+    plt.switch_backend("Agg")
+    output_dir = Path(spec["output_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    metadata, trace = read_fitted_apic20_protocol_csv_bundle(spec["protocol_name"])
+    parameters = FittedApic20NullclineParameters(**metadata["parameters"])
+    gif_path = generate_fitted_apic20_moving_nullcline_animation_from_trace(
+        metadata=metadata,
+        trace=trace,
+        parameters=parameters,
+        output_gif_path=output_dir / spec["gif_filename"],
+        show_plot=show_plot,
+    )
+    snapshot_times = existing_snapshot_times_for_regeneration(spec)
+    snapshots = {}
+    for label, snapshot_time_ms in snapshot_times.items():
+        snapshots[label] = generate_fitted_apic20_moving_nullcline_snapshot_from_trace(
+            metadata=metadata,
+            trace=trace,
+            parameters=parameters,
+            snapshot_time_ms=snapshot_time_ms,
+            output_png_path=output_dir / f"{spec['snapshot_prefix']}_{label}.png",
+            show_plot=show_plot,
+        )
+    metrics_path = output_dir / spec["metrics_filename"]
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "protocol_name": spec["protocol_name"],
+                "gif_path": str(gif_path),
+                "snapshots": snapshots,
+                "snapshot_times_ms": snapshot_times,
+                "regenerated_from_csv": True,
+                "trace_path": metadata.get("trace_csv"),
+                "metadata_path": str(
+                    FITTED_NULLCLINE_INTERACTIVE_CSV_DIR
+                    / spec["protocol_name"]
+                    / "metadata.json"
+                ),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return {
+        "protocol_name": spec["protocol_name"],
+        "gif_path": str(gif_path),
+        "metrics_path": str(metrics_path),
+        "snapshot_count": len(snapshots),
+    }
+
+
+def regenerate_all_fitted_apic20_plot_outputs_from_existing_csv(show_plot=False):
+    return [
+        regenerate_fitted_apic20_plot_output_from_existing_csv(spec, show_plot=show_plot)
+        for spec in fitted_apic20_existing_plot_regeneration_specs()
+    ]
+
+
 def _make_parallel_script_job(test_class, method_name):
     return lambda _: getattr(test_class(), method_name)()
 
@@ -3318,20 +3634,12 @@ def run_fitted_apic20_script_job(job_name, job_function):
 def regenerate_all_fitted_apic20_script_outputs_in_parallel(
         n_jobs=PARALLEL_SCRIPT_N_JOBS,
 ):
-    parameter_csv_path, _reference, _parameters, _trace = fit_and_save_fitted_apic20_parameter_csv()
-    jobs = fitted_apic20_parallel_script_jobs()
+    jobs = fitted_apic20_existing_plot_regeneration_specs()
     results = Parallel(n_jobs=n_jobs)(
-        delayed(run_fitted_apic20_script_job)(job_name, job_function)
-        for job_name, job_function in jobs
+        delayed(regenerate_fitted_apic20_plot_output_from_existing_csv)(spec)
+        for spec in jobs
     )
-    return [
-        {
-            "job_name": "parameter_fit_csv",
-            "paths": [str(parameter_csv_path)],
-            "snapshot_count": 0,
-        },
-        *results,
-    ]
+    return results
 
 
 class SimulateFittedApic20ParallelScriptTestCases(unittest.TestCase):
