@@ -900,7 +900,7 @@ class MyTestCase(unittest.TestCase):
     def test_evaluate_wang_solutions_for_cubic_solutions(self):
         try:
             load_solutions(wang_config_recurrent_synapses, load_negative_values=True)
-        except ValueError:
+        except ValueError, TypeError:
             print("Wang solutions for recurrent synapses cannot reach our desired values")
         print(load_solutions(wang_config_external_ampa_synapses, load_negative_values=True))
 

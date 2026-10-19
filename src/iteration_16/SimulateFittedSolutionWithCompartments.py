@@ -4,6 +4,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 from brian2 import Hz, second, nS, ms
+from brian2.units import nF
 from joblib import Parallel, delayed
 
 from brian2 import BrianLogger
@@ -53,18 +54,39 @@ def save_comparison_run(df: pd.DataFrame, config: ConductanceDiffusionSimulation
 
 class CompartmentSimulationsWithFittedSolution(unittest.TestCase):
 
+    " Solving P(x) = 0 to determine x = "
     def test_config_for_weak_configuration_loads(self):
-        cfg = config_with_weak_synapses.with_property(N_E=1000)
+        cfg = config_with_weak_synapses.with_property(N_E=1)
         solutions = load_solutions(config=cfg)
         print(solutions)
 
         for gr, gamma in solutions:
-            print(gr, gamma)
+            print("gr=", gr, ", gamma=", gamma)
             object_under_test = cfg.with_fitted_solution(gr, gamma)
             self.assertAlmostEqual(gamma, object_under_test.g_i0() / object_under_test.g_e0())
 
             print(object_under_test.r_e)
-            print("tau membrane is: ", object_under_test.tau)
+            print("tau membrane is: ", object_under_test.tau_m())
+            print("tau 0 is: ", object_under_test.tau_0())
+            print("g 0 tot is: ", object_under_test.g_0_tot())
+            print("E 0 is: ", object_under_test.E_0())
+
+    " Solving P(x) = 0 to determine x = "
+    def test_config_for_g_leak_from_nmda_simulations(self):
+        cfg = config_with_weak_synapses.with_property(N_E=1, g_L = 3.056 * nS, membrane_capacitance = 0.013165601312198644 * nF)
+        solutions = load_solutions(config=cfg)
+        print(solutions)
+
+        for gr, gamma in solutions:
+            print("gr=", gr, ", gamma=", gamma)
+            object_under_test = cfg.with_fitted_solution(gr, gamma)
+            self.assertAlmostEqual(gamma, object_under_test.g_i0() / object_under_test.g_e0())
+
+            print(object_under_test.r_e)
+            print("tau membrane is: ", object_under_test.tau_m())
+            print("tau 0 is: ", object_under_test.tau_0())
+            print("g 0 tot is: ", object_under_test.g_0_tot())
+            print("E 0 is: ", object_under_test.E_0())
 
     def test_config_for_weak_configuration_loads_tau_m_20(self):
         cfg = config_with_tau_m_10.with_property(N_E=1000)

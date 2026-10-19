@@ -146,8 +146,14 @@ class ConductanceDiffusionSimulationConfig:
     def tau_m(self):
         return self.membrane_capacitance / self.g_L
 
+    def g_0_tot(self):
+        return self.g_L + self.g_e0() + self.g_i0()
+
     def tau_0(self):
-        return self.membrane_capacitance / (self.g_L + self.g_e0() + self.g_i0())
+        return self.membrane_capacitance / self.g_0_tot()
+
+    def E_0(self):
+        return (self.g_L * self.e_L + self.g_e0() * self.e_ampa + self.g_i0() * self.e_gaba) / self.g_0_tot()
 
     def with_property(self, **changes):
 
