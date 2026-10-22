@@ -57,11 +57,43 @@ class ComputeMaxReversalForBistability(unittest.TestCase):
         compute_E_L(A=0.25, B=0.062, E_E=0.0)
 
     def test_plot_E_L_against_Mg2_concentration(self):
+        shade_alpha = 0.4  # Easily configurable
 
-        C_s = np.linspace(0.5, 3, num=100)
-        E_L_s_008 = [compute_E_L(C/3.57, B = 0.08)[0] for C in C_s]
-        E_L_s_0062 = [compute_E_L(C/3.57, B = 0.062)[0] for C in C_s]
-        plt.plot(C_s, E_L_s_008, label='B=0.08')
-        plt.plot(C_s, E_L_s_0062, label='B=0.062')
-        plt.legend()
+        # Approximate observed ranges from Ding et al. (2016), Fig. 4A–B
+        # https://pmc.ncbi.nlm.nih.gov/articles/PMC5441687/pdf/nihms857315.pdf
+        awake_range_mM = (0.45, 1.05)
+        sleep_range_mM = (0.55, 1.20)
+
+        C_s = np.linspace(0.4, 2, num=100)
+        E_L_s_008 = [compute_E_L(C / 3.57, B=0.08)[0] for C in C_s]
+        E_L_s_0062 = [compute_E_L(C / 3.57, B=0.062)[0] for C in C_s]
+
+        fig, ax = plt.subplots()
+
+        ax.axvspan(
+            *awake_range_mM,
+            color="gold",
+            alpha=shade_alpha,
+            linewidth=0,
+            label="Awake: approx. plotted range",
+            zorder=0,
+        )
+        ax.axvspan(
+            *sleep_range_mM,
+            color="cornflowerblue",
+            alpha=shade_alpha,
+            linewidth=0,
+            label="Sleep: approx. plotted range",
+            zorder=0,
+        )
+
+        ax.plot(C_s, E_L_s_008, label="B=0.08", lw=2)
+        ax.plot(C_s, E_L_s_0062, label="B=0.062", lw=2)
+
+        ax.set_xlabel(r"Extracellular $[\mathrm{Mg}^{2+}]_o$ (mM)")
+        ax.set_ylabel(r"$E_{L}^{*}$ (mV)")
+        ax.set_title(r"Upper Bound on $E_L$ for NMDA-Mediated Bistability")
+        ax.set_xlim(C_s[0], C_s[-1])
+        ax.legend()
+
         show_plots_non_blocking()

@@ -110,6 +110,23 @@ FITTED_APIC20_INTERACTIVE_PROTOCOL_NAMES = (
     "current_balance_three_spike_with_s_saturation",
     "standard_two_spike_with_s_saturation",
     "current_balance_two_spike_with_s_saturation",
+    "current_balance_three_spike_e_l_minus_50",
+    "current_balance_three_spike_e_l_minus_50_g_nmda_max_1_nS",
+    *(
+        f"current_balance_three_spike_e_l_minus_50_g_nmda_max_{gmax}_nS"
+        for gmax in range(2, 11)
+    ),
+    "current_balance_three_spike_e_l_minus_60",
+    "current_balance_three_spike_e_l_minus_60_g_nmda_max_1_nS",
+    *(
+        f"current_balance_three_spike_e_l_minus_60_g_nmda_max_{gmax}_nS"
+        for gmax in range(2, 11)
+    ),
+    "current_balance_three_spike_e_l_minus_70",
+    *(
+        f"current_balance_three_spike_e_l_minus_70_g_nmda_max_{gmax}_nS"
+        for gmax in range(1, 11)
+    ),
     *FITTED_APIC20_G_NMDA_AMPLIFICATION_PROTOCOL_NAMES,
 )
 
@@ -1722,7 +1739,65 @@ def fitted_apic20_interactive_protocol_specs():
             "t_max_ms": TWO_SPIKE_T_MAX_MS,
             "with_s_saturation": True,
         },
+        "current_balance_three_spike_e_l_minus_50": {
+            "label": "current-balance nullcline, 3 spikes, E_L=-50 mV",
+            "spike_times_ms": fitted_apic20_spike_times_ms(),
+            "t_min_ms": INTERACTIVE_T_MIN_MS,
+            "t_max_ms": INTERACTIVE_T_MAX_MS,
+            "with_s_saturation": False,
+        },
+        "current_balance_three_spike_e_l_minus_50_g_nmda_max_1_nS": {
+            "label": (
+                "current-balance nullcline, 3 spikes, E_L=-50 mV, "
+                "g_NMDA,max=1 nS"
+            ),
+            "spike_times_ms": fitted_apic20_spike_times_ms(),
+            "t_min_ms": INTERACTIVE_T_MIN_MS,
+            "t_max_ms": INTERACTIVE_T_MAX_MS,
+            "with_s_saturation": False,
+        },
+        "current_balance_three_spike_e_l_minus_60": {
+            "label": "current-balance nullcline, 3 spikes, E_L=-60 mV",
+            "spike_times_ms": fitted_apic20_spike_times_ms(),
+            "t_min_ms": INTERACTIVE_T_MIN_MS,
+            "t_max_ms": INTERACTIVE_T_MAX_MS,
+            "with_s_saturation": False,
+        },
+        "current_balance_three_spike_e_l_minus_60_g_nmda_max_1_nS": {
+            "label": (
+                "current-balance nullcline, 3 spikes, E_L=-60 mV, "
+                "g_NMDA,max=1 nS"
+            ),
+            "spike_times_ms": fitted_apic20_spike_times_ms(),
+            "t_min_ms": INTERACTIVE_T_MIN_MS,
+            "t_max_ms": INTERACTIVE_T_MAX_MS,
+            "with_s_saturation": False,
+        },
+        "current_balance_three_spike_e_l_minus_70": {
+            "label": "current-balance nullcline, 3 spikes, E_L=-70 mV",
+            "spike_times_ms": fitted_apic20_spike_times_ms(),
+            "t_min_ms": INTERACTIVE_T_MIN_MS,
+            "t_max_ms": INTERACTIVE_T_MAX_MS,
+            "with_s_saturation": False,
+        },
     }
+    for e_l_mV, gmax_values in ((-50, range(2, 11)),
+                                 (-60, range(2, 11)),
+                                 (-70, range(1, 11))):
+        for gmax in gmax_values:
+            specs[
+                f"current_balance_three_spike_e_l_minus_{abs(e_l_mV)}_"
+                f"g_nmda_max_{gmax}_nS"
+            ] = {
+                "label": (
+                    "current-balance nullcline, 3 spikes, "
+                    f"E_L={e_l_mV} mV, g_NMDA,max={gmax} nS"
+                ),
+                "spike_times_ms": fitted_apic20_spike_times_ms(),
+                "t_min_ms": INTERACTIVE_T_MIN_MS,
+                "t_max_ms": INTERACTIVE_T_MAX_MS,
+                "with_s_saturation": False,
+            }
     for amplification in G_NMDA_MAX_AMPLIFICATIONS:
         amp_label = amplification_label(amplification)
         specs[fitted_apic20_g_nmda_amplification_protocol_name(amplification)] = {
