@@ -10,6 +10,7 @@ import numpy as np
 import sympy as sp
 from joblib import Parallel, delayed
 from scipy.special import logsumexp, ndtr
+from scipy.stats import kurtosis, norm, skew, shapiro
 from brian2 import (
     Hz,
     Clock,
@@ -48,6 +49,10 @@ from iteration_16.simpy import bind_config_to_sympy_values  # noqa: E402
 from iteration_20_nonlin_dynamics_NMDA.SimulateFittedApic20NullclineScripts import (  # noqa: E402
     read_fitted_apic20_parameters_from_csv,
 )
+from iteration_21_nmda_spikes_under_ei_balance.GeneralizedLambert import (  # noqa: E402
+    find_fixed_points,
+    fixed_point_current_slope,
+)
 
 ITERATION_16_SOLUTIONS_PATH = SRC_DIR / "iteration_16" / "solutions" / "solutions.txt"
 OUTPUT_DIR = Path(__file__).resolve().parent / "plot_output"
@@ -67,15 +72,16 @@ DEBUG_DISTRIBUTION_VARIABLES = {
 class DebugHistogramSaveConfiguration:
     """Select the compact histogram debug files produced by the long run."""
 
-    enabled: bool = False
+    enabled: bool = True
     save_g_nmda: bool = False
     save_s_nmda: bool = False
     save_x_nmda: bool = False
-    save_g_ampa: bool = False
+    save_g_ampa: bool = True
     save_voltage: bool = False
     save_csv: bool = True
     save_json: bool = False
     bins: int = 200
+    fit_sample_size: int = 500_000
 
     def selected_result_keys(self):
         flags = {
@@ -88,14 +94,14 @@ class DebugHistogramSaveConfiguration:
         return [key for key, selected in flags.items() if selected]
 
 
-# Edit this configuration before running the 10,000-compartment runnable.
+# Edit this configuration before running the 1,000-compartment runnable.
 # The camelCase name is retained because this is the requested runnable flag.
 saveDebugFile = DebugHistogramSaveConfiguration(
-    enabled=False,
+    enabled=True,
     save_g_nmda=False,
     save_s_nmda=False,
     save_x_nmda=False,
-    save_g_ampa=False,
+    save_g_ampa=True,
     save_voltage=True,
     save_csv=True,
     save_json=False,
@@ -282,7 +288,7 @@ def format_storage_size(number_of_bytes):
 
 
 def save_debug_histograms(result, output_dir, configuration):
-    """Save selected histogram counts/edges as separate CSV and/or JSON files."""
+    """Save selected histograms and balanced raw samples for later fitting."""
     if not configuration.enabled:
         return {}
     if not configuration.save_csv and not configuration.save_json:
@@ -294,8 +300,11 @@ def save_debug_histograms(result, output_dir, configuration):
     saved_paths = {}
     for key in configuration.selected_result_keys():
         label = DEBUG_DISTRIBUTION_VARIABLES[key]
-        counts, bin_edges = np.histogram(
-            np.asarray(result[key]).ravel(), bins=configuration.bins
+        values = np.asarray(result[key])
+        counts, bin_edges = np.histogram(values.ravel(), bins=configuration.bins)
+        raw_fit_sample = sample_original_values_by_compartment(
+            values,
+            sample_size=configuration.fit_sample_size,
         )
         paths = []
         if configuration.save_json:
@@ -312,6 +321,16 @@ def save_debug_histograms(result, output_dir, configuration):
                 )
             )
             paths.append(json_path)
+            raw_json_path = output_dir / f"{key}_fit_sample.json"
+            raw_json_path.write_text(
+                json.dumps(
+                    {
+                        "variable": key,
+                        "label": label,
+                        "values": raw_fit_sample.tolist(),
+                    }
+                )
+            )
         if configuration.save_csv:
             csv_path = output_dir / f"{key}_histogram.csv"
             with csv_path.open("w", newline="") as stream:
@@ -319,8 +338,161 @@ def save_debug_histograms(result, output_dir, configuration):
                 writer.writerow(["bin_left", "bin_right", "count"])
                 writer.writerows(zip(bin_edges[:-1], bin_edges[1:], counts))
             paths.append(csv_path)
+            raw_csv_path = output_dir / f"{key}_fit_sample.csv"
+            np.savetxt(
+                raw_csv_path,
+                raw_fit_sample,
+                delimiter=",",
+                header="value",
+                comments="",
+            )
         saved_paths[key] = paths
     return saved_paths
+
+
+def sample_original_values_by_compartment(values, sample_size=500_000, random_seed=21):
+    """Draw a balanced sample of original values across model compartments."""
+    values = np.asarray(values)
+    if values.ndim != 2:
+        raise ValueError("Expected a models-by-time array")
+    n_models, n_times = values.shape
+    sample_size = min(int(sample_size), int(values.size))
+    if sample_size < 1:
+        raise ValueError("sample_size must be positive")
+    allocations = np.full(n_models, sample_size // n_models, dtype=int)
+    allocations[: sample_size % n_models] += 1
+    rng = np.random.default_rng(random_seed)
+    samples = []
+    for model_index, allocation in enumerate(allocations):
+        if allocation:
+            time_indices = rng.choice(n_times, size=allocation, replace=False)
+            samples.append(values[model_index, time_indices])
+    return np.concatenate(samples).astype(float, copy=False)
+
+
+def load_debug_fit_sample(sample_path, variable_name):
+    """Load original, non-binned observations saved for Gaussian fitting."""
+    sample_path = Path(sample_path)
+    if sample_path.suffix.lower() == ".csv":
+        values = np.loadtxt(sample_path, delimiter=",", skiprows=1)
+    elif sample_path.suffix.lower() == ".json":
+        data = json.loads(sample_path.read_text())
+        if data["variable"] != variable_name:
+            raise ValueError(f"File contains {data['variable']!r}, not {variable_name!r}")
+        values = np.asarray(data["values"], dtype=float)
+    else:
+        raise ValueError("Fit-sample file must have a .csv or .json suffix")
+    return np.asarray(values, dtype=float).ravel()
+
+
+def fit_saved_debug_sample(
+    sample_path,
+    variable_name,
+    output_path=None,
+    number_of_gaussians=2,
+):
+    """Fit and plot one saved raw sample without histogram reconstruction."""
+    values = load_debug_fit_sample(sample_path, variable_name)
+    fit = fit_gaussian_mixture(
+        values,
+        number_of_gaussians=number_of_gaussians,
+        max_samples=values.size,
+    )
+    shapiro_values = values[
+        np.linspace(0, values.size - 1, min(values.size, 5_000), dtype=np.int64)
+    ]
+    shapiro_result = shapiro(shapiro_values)
+    fit["shapiro_w"] = float(shapiro_result.statistic)
+    fit["shapiro_p_value"] = float(shapiro_result.pvalue)
+    fit["shapiro_sample_size"] = int(shapiro_values.size)
+    sample_mean = float(np.mean(values))
+    sample_standard_deviation = float(np.std(values))
+    if sample_standard_deviation <= np.finfo(float).eps:
+        raise ValueError("Gaussianity measures require non-constant values")
+    standardized_values = (values - sample_mean) / sample_standard_deviation
+    fit["skewness"] = float(skew(standardized_values, bias=False))
+    fit["excess_kurtosis"] = float(
+        kurtosis(standardized_values, fisher=True, bias=False)
+    )
+    standardized_density, standardized_edges = np.histogram(
+        standardized_values,
+        bins=200,
+        density=True,
+    )
+    standardized_centers = 0.5 * (
+        standardized_edges[:-1] + standardized_edges[1:]
+    )
+    standard_normal_density = norm.pdf(standardized_centers)
+    fit["standardized_histogram_rmse"] = float(
+        np.sqrt(np.mean((standardized_density - standard_normal_density) ** 2))
+    )
+    if output_path is None:
+        output_path = Path(sample_path).with_name(f"fit_{variable_name}.png")
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure, (distribution_axis, qq_axis) = plt.subplots(1, 2, figsize=(14, 6))
+    distribution_axis.hist(
+        values, bins=200, density=True, color="0.85", label="raw sample"
+    )
+    for component_index in range(number_of_gaussians):
+        distribution_axis.plot(
+            fit["grid"],
+            fit["component_density"][:, component_index],
+            linestyle=":",
+            label=f"Gaussian {component_index + 1}",
+        )
+    distribution_axis.plot(
+        fit["grid"], fit["mixture_density"], linewidth=2, label="mixture"
+    )
+    interpretation = (
+        r"single Gaussian $\bf{plausible}$"
+        if fit["shapiro_p_value"] >= 0.05
+        else r"single Gaussian $\bf{implausible}$"
+    )
+    distribution_axis.set_xlabel(DEBUG_DISTRIBUTION_VARIABLES[variable_name])
+    distribution_axis.set_ylabel("density")
+    distribution_axis.set_title(
+        f"Distribution and {number_of_gaussians}-Gaussian mixture"
+    )
+    distribution_axis.legend()
+
+    qq_sample_size = min(standardized_values.size, 20_000)
+    qq_indices = np.linspace(
+        0, standardized_values.size - 1, qq_sample_size, dtype=np.int64
+    )
+    ordered_standardized_values = np.sort(standardized_values)[qq_indices]
+    probabilities = (np.arange(qq_sample_size) + 0.5) / qq_sample_size
+    theoretical_quantiles = norm.ppf(probabilities)
+    qq_axis.scatter(
+        theoretical_quantiles,
+        ordered_standardized_values,
+        s=5,
+        alpha=0.35,
+        rasterized=True,
+    )
+    qq_limits = [
+        min(theoretical_quantiles[0], ordered_standardized_values[0]),
+        max(theoretical_quantiles[-1], ordered_standardized_values[-1]),
+    ]
+    qq_axis.plot(qq_limits, qq_limits, "k--", linewidth=1, label="normal reference")
+    qq_axis.set_xlim(qq_limits)
+    qq_axis.set_ylim(qq_limits)
+    qq_axis.set_xlabel("theoretical standard-normal quantiles")
+    qq_axis.set_ylabel("observed standardized quantiles")
+    qq_axis.set_title(f"Normal Q–Q plot (n={qq_sample_size:,})")
+    qq_axis.legend()
+
+    figure.suptitle(
+        f"{DEBUG_DISTRIBUTION_VARIABLES[variable_name]} Gaussianity\n"
+        f"Shapiro–Wilk: W={fit['shapiro_w']:.5f}, p={fit['shapiro_p_value']:.3g}, "
+        f"n={fit['shapiro_sample_size']:,} — {interpretation} at α=0.05; \n"
+        f"standardized histogram RMSE={fit['standardized_histogram_rmse']:.4g}; "
+        f"skewness={fit['skewness']:.4g}; "
+        f"excess kurtosis={fit['excess_kurtosis']:.4g}"
+    )
+    figure.tight_layout(rect=(0, 0, 1, 0.91))
+    figure.savefig(output_path, dpi=200, bbox_inches="tight")
+    return output_path, fit
 
 
 def load_debug_histogram(histogram_path, variable_name):
@@ -359,7 +531,8 @@ def fit_saved_debug_histogram(
     histogram_path,
     variable_name,
     output_path=None,
-    max_fit_samples=20_000,
+    max_fit_samples=500_000,
+    number_of_gaussians=2,
 ):
     """Fit and plot one saved histogram without rerunning the simulation."""
     histogram = load_debug_histogram(histogram_path, variable_name)
@@ -370,8 +543,9 @@ def fit_saved_debug_histogram(
     if total_count < 5:
         raise ValueError("At least five histogram observations are required")
 
-    # Deterministically approximate the weighted histogram with at most 20k
-    # bin-centre observations, which keeps each exploratory fit quick.
+    # Deterministic proportional reconstruction of the binned empirical
+    # distribution using at most 500k bin-centre observations. Integer sample
+    # allocations use the largest-remainder apportionment method.
     fit_sample_count = min(total_count, int(max_fit_samples))
     exact_repetitions = counts.astype(float) * fit_sample_count / total_count
     repetitions = np.floor(exact_repetitions).astype(int)
@@ -380,7 +554,22 @@ def fit_saved_debug_histogram(
         residual_order = np.argsort(exact_repetitions - repetitions)[::-1]
         repetitions[residual_order[:missing]] += 1
     fit_values = np.repeat(bin_centers, repetitions)
-    fit = fit_two_gaussian_mixture(fit_values, max_samples=max_fit_samples)
+    fit = fit_gaussian_mixture(
+        fit_values,
+        max_samples=max_fit_samples,
+        number_of_gaussians=number_of_gaussians,
+    )
+    shapiro_sample_size = min(fit_values.size, 5_000)
+    shapiro_indices = np.linspace(
+        0,
+        fit_values.size - 1,
+        shapiro_sample_size,
+        dtype=np.int64,
+    )
+    shapiro_result = shapiro(np.sort(fit_values)[shapiro_indices])
+    fit["shapiro_w"] = float(shapiro_result.statistic)
+    fit["shapiro_p_value"] = float(shapiro_result.pvalue)
+    fit["shapiro_sample_size"] = int(shapiro_sample_size)
 
     if output_path is None:
         output_path = Path(histogram_path).with_name(f"fit_{variable_name}.png")
@@ -390,7 +579,7 @@ def fit_saved_debug_histogram(
     density = counts / (total_count * widths)
     figure, axis = plt.subplots(figsize=(8, 6))
     axis.stairs(density, bin_edges, fill=True, color="0.85", label="saved histogram")
-    for component_index in range(2):
+    for component_index in range(number_of_gaussians):
         axis.plot(
             fit["grid"],
             fit["component_density"][:, component_index],
@@ -400,15 +589,30 @@ def fit_saved_debug_histogram(
     axis.plot(fit["grid"], fit["mixture_density"], linewidth=2, label="mixture")
     axis.set_xlabel(histogram["label"])
     axis.set_ylabel("density")
-    axis.set_title(f"Two-Gaussian fit: {histogram['label']}")
+    normality_interpretation = (
+        "single Gaussian not rejected"
+        if fit["shapiro_p_value"] >= 0.05
+        else "single Gaussian rejected"
+    )
+    axis.set_title(
+        f"{number_of_gaussians}-Gaussian fit: {histogram['label']}\n"
+        f"Shapiro–Wilk: W={fit['shapiro_w']:.5f}, "
+        f"p={fit['shapiro_p_value']:.3g}, n={fit['shapiro_sample_size']:,} — "
+        f"{normality_interpretation} at α=0.05"
+    )
     axis.legend()
     figure.tight_layout()
     figure.savefig(output_path, dpi=200, bbox_inches="tight")
     return output_path, fit
 
 
-def fit_two_gaussian_mixture(values, random_seed=21, max_samples=20_000):
-    """Fit a 1-D two-Gaussian mixture and score it on held-out samples.
+def fit_gaussian_mixture(
+    values,
+    number_of_gaussians=2,
+    random_seed=21,
+    max_samples=500_000,
+):
+    """Fit a 1-D Gaussian mixture and score it on held-out samples.
 
     Several quantile-based initializations are tried because the distributions
     produced here are usually one broad Gaussian with a small lower shoulder.
@@ -417,8 +621,14 @@ def fit_two_gaussian_mixture(values, random_seed=21, max_samples=20_000):
     """
     values = np.asarray(values, dtype=float).ravel()
     values = values[np.isfinite(values)]
-    if values.size < 5:
-        raise ValueError("At least five finite samples are required")
+    if not isinstance(number_of_gaussians, (int, np.integer)):
+        raise TypeError("number_of_gaussians must be an integer")
+    if number_of_gaussians < 1:
+        raise ValueError("number_of_gaussians must be at least 1")
+    if values.size < max(5, number_of_gaussians + 1):
+        raise ValueError(
+            f"At least {max(5, number_of_gaussians + 1)} finite samples are required"
+        )
     rng = np.random.default_rng(random_seed)
     if values.size > max_samples:
         values = values[rng.choice(values.size, max_samples, replace=False)]
@@ -428,10 +638,20 @@ def fit_two_gaussian_mixture(values, random_seed=21, max_samples=20_000):
     overall_std = max(float(np.std(train)), np.finfo(float).eps)
     minimum_std = max(overall_std * 1e-3, np.finfo(float).eps)
     best_fit = None
-    for percentiles in ((15.0, 60.0), (25.0, 75.0), (40.0, 85.0)):
+    percentile_step = 100.0 / number_of_gaussians
+    base_percentiles = np.linspace(
+        percentile_step / 2,
+        100.0 - percentile_step / 2,
+        number_of_gaussians,
+    )
+    percentile_initializations = (
+        np.clip(base_percentiles + shift * percentile_step, 1.0, 99.0)
+        for shift in (-0.2, 0.0, 0.2)
+    )
+    for percentiles in percentile_initializations:
         means = np.percentile(train, percentiles)
-        standard_deviations = np.full(2, overall_std)
-        weights = np.full(2, 0.5)
+        standard_deviations = np.full(number_of_gaussians, overall_std)
+        weights = np.full(number_of_gaussians, 1.0 / number_of_gaussians)
 
         for _ in range(200):
             old_parameters = np.r_[weights, means, standard_deviations]
@@ -525,7 +745,8 @@ def fit_two_gaussian_mixture(values, random_seed=21, max_samples=20_000):
         "component_density": component_density,
         "mixture_density": np.sum(component_density, axis=1),
         "held_out_mean_log_likelihood": held_out_mean_log_likelihood,
-        "bic": -2 * train_log_likelihood + 5 * np.log(train.size),
+        "bic": -2 * train_log_likelihood
+        + (3 * number_of_gaussians - 1) * np.log(train.size),
         "cdf_max_error": cdf_max_error,
     }
 
@@ -668,8 +889,8 @@ def plot_chosen_ampa_nmda_traces(
             fit_axis.plot(fit["density"], fit["grid"], color=color, linewidth=2)
             parameter_text = f"scale={fit['scale']:.3g}"
         else:
-            fit = fit_two_gaussian_mixture(values)
-            for component_index in range(2):
+            fit = fit_gaussian_mixture(values)
+            for component_index in range(fit["component_density"].shape[1]):
                 fit_axis.plot(
                     fit["component_density"][:, component_index],
                     fit["grid"],
@@ -680,7 +901,9 @@ def plot_chosen_ampa_nmda_traces(
             fit_axis.plot(
                 fit["mixture_density"], fit["grid"], color=color, linewidth=2
             )
-            parameter_text = "2-Gaussian mixture"
+            parameter_text = (
+                f"{fit['component_density'].shape[1]}-Gaussian mixture"
+            )
         fit_axis.set_xlabel("density")
         fit_axis.text(
             0.98,
@@ -714,6 +937,130 @@ def plot_chosen_ampa_nmda_traces(
     else:
         fig.tight_layout()
     fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    return output_path
+
+
+def compute_per_unit_s0_and_fixed_points(
+    result,
+    *,
+    g_nmda_max_nS,
+    n_nmda,
+    g_leak_nS,
+    e_leak_mV,
+    e_excitatory_mV,
+    mg,
+):
+    """Compute post-burn-in s0 and stable Lambert fixed points per unit."""
+    s0 = np.mean(np.asarray(result["s_nmda"], dtype=float), axis=1)
+    open_g_nmda_nS = (float(g_nmda_max_nS) / int(n_nmda)) * s0
+    lower_fixed_point_mV = [None] * s0.size
+    upper_fixed_point_mV = [None] * s0.size
+    magnesium_coefficient = float(mg) / 3.57
+    voltage_separator_mV = 0.5 * (float(e_leak_mV) + float(e_excitatory_mV))
+
+    for unit_index, g_n in enumerate(open_g_nmda_nS):
+        roots = find_fixed_points(
+            g_n,
+            g_l=float(g_leak_nS),
+            e_l=float(e_leak_mV),
+            e_e=float(e_excitatory_mV),
+            a=magnesium_coefficient,
+            b=0.08,
+        )
+        stable_roots = [
+            voltage
+            for voltage in roots
+            if fixed_point_current_slope(
+                voltage,
+                g_n,
+                g_l=float(g_leak_nS),
+                e_e=float(e_excitatory_mV),
+                a=magnesium_coefficient,
+                b=0.08,
+            )
+            > 0.0
+        ]
+        if len(stable_roots) >= 2:
+            lower_fixed_point_mV[unit_index] = float(stable_roots[0])
+            upper_fixed_point_mV[unit_index] = float(stable_roots[-1])
+        elif stable_roots:
+            if stable_roots[0] < voltage_separator_mV:
+                lower_fixed_point_mV[unit_index] = float(stable_roots[0])
+            else:
+                upper_fixed_point_mV[unit_index] = float(stable_roots[0])
+
+    return {
+        "s0": s0,
+        "open_g_nmda_nS": open_g_nmda_nS,
+        "lower_fixed_point_mV": lower_fixed_point_mV,
+        "upper_fixed_point_mV": upper_fixed_point_mV,
+    }
+
+
+def plot_voltage_and_fixed_point_distributions(
+    result,
+    fixed_point_result,
+    output_path,
+):
+    """Compare simulated voltage with per-unit Lambert fixed-point distributions."""
+    voltage_mV = np.asarray(result["voltage_mV"], dtype=float).ravel()
+    lower = fixed_point_result["lower_fixed_point_mV"]
+    upper = fixed_point_result["upper_fixed_point_mV"]
+    finite_lower = np.asarray(
+        [value for value in lower if value is not None], dtype=float
+    )
+    finite_upper = np.asarray(
+        [value for value in upper if value is not None], dtype=float
+    )
+    all_values = [voltage_mV]
+    if finite_lower.size:
+        all_values.append(finite_lower)
+    if finite_upper.size:
+        all_values.append(finite_upper)
+    combined = np.concatenate(all_values)
+    bin_edges = np.linspace(float(np.min(combined)), float(np.max(combined)), 151)
+
+    figure, axis = plt.subplots(figsize=(11, 7))
+    axis.hist(
+        voltage_mV,
+        bins=bin_edges,
+        density=True,
+        histtype="stepfilled",
+        color="0.75",
+        alpha=0.55,
+        label=f"simulated V (n={voltage_mV.size:,})",
+    )
+    if finite_lower.size:
+        axis.hist(
+            finite_lower,
+            bins=bin_edges,
+            density=True,
+            histtype="step",
+            linewidth=2,
+            color="tab:blue",
+            label=f"lower stable fixed point (n={finite_lower.size:,})",
+        )
+    if finite_upper.size:
+        axis.hist(
+            finite_upper,
+            bins=bin_edges,
+            density=True,
+            histtype="step",
+            linewidth=2,
+            color="tab:orange",
+            label=f"upper stable fixed point (n={finite_upper.size:,})",
+        )
+    axis.set_xlabel("voltage [mV]")
+    axis.set_ylabel("probability density")
+    axis.set_title(
+        "Simulated membrane-voltage distribution versus per-unit fixed points\n"
+        r"$s_0^{(i)}=\langle s_{NMDA}^{(i)}(t)\rangle$ after burn-in"
+    )
+    axis.legend()
+    figure.tight_layout()
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output_path, dpi=200, bbox_inches="tight")
     return output_path
 
 
@@ -1056,18 +1403,18 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
         self.assertTrue(json_path.exists(), str(json_path))
         self.assertGreater(json_path.stat().st_size, 0, str(json_path))
 
-    def test_simulate_10_000_ampa_nmda_single_compartments(
+    def test_simulate_1_000_ampa_nmda_single_compartments(
         self,
-        r_e=6 * Hz,
+        r_e=8 * Hz,
         show_plot=True,
     ):
 
         # Principal experiment inputs are intentionally plain and local: edit
         # these values, then run this one test from the IDE.
-        n_models = 10_000
+        n_models = 1_000
         n_e = 800
         n_NMDA = 10
-        simulation_time = 2_000 * ms
+        simulation_time = 1_000 * ms
         burn_in = 100 * ms
         dt = 0.1 * ms
         random_seed = 21
@@ -1087,7 +1434,7 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
         w_NMDA = fitted.spike_weight
 
         # These were not fitted in iteration 20 and remain explicit inputs.
-        tau_AMPA = 5 * ms
+        tau_AMPA = 2 * ms
         w_AMPA = 0.05 * nS
         Mg = 1.0
 
@@ -1114,6 +1461,34 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
             Mg=Mg,
         )
 
+        fixed_point_result = compute_per_unit_s0_and_fixed_points(
+            result,
+            g_nmda_max_nS=float(g_NMDA_max / nS),
+            n_nmda=n_NMDA,
+            g_leak_nS=float(g_L / nS),
+            e_leak_mV=float(E_L / mV),
+            e_excitatory_mV=float(E_E / mV),
+            mg=Mg,
+        )
+        fixed_point_distribution_path = plot_voltage_and_fixed_point_distributions(
+            result,
+            fixed_point_result,
+            OUTPUT_DIR
+            / f"voltage_vs_fixed_point_distributions_{float(r_e / Hz):g}_Hz.png",
+        )
+        number_of_lower_points = sum(
+            value is not None
+            for value in fixed_point_result["lower_fixed_point_mV"]
+        )
+        number_of_upper_points = sum(
+            value is not None
+            for value in fixed_point_result["upper_fixed_point_mV"]
+        )
+        print(
+            f"Per-unit s0 fixed points: lower={number_of_lower_points:,}, "
+            f"upper={number_of_upper_points:,}, units={n_models:,}"
+        )
+
         debug_output_dir = (
             DEBUG_DISTRIBUTION_DIR / f"{float(r_e / Hz):g}_Hz"
         )
@@ -1135,6 +1510,13 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
                         f"Saved {variable_name} histogram: {path} "
                         f"({format_storage_size(path.stat().st_size)})"
                     )
+                for suffix in ("csv", "json"):
+                    raw_path = debug_output_dir / f"{variable_name}_fit_sample.{suffix}"
+                    if raw_path.exists():
+                        print(
+                            f"Saved {variable_name} raw fit sample: {raw_path} "
+                            f"({format_storage_size(raw_path.stat().st_size)})"
+                        )
 
         print(
             f"V = {result['ensemble_mean_mV']:.3f} mV, "
@@ -1168,6 +1550,11 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
         self.assertGreater(result["ensemble_variance_mV2"], 0.0)
         self.assertTrue(plot_path.exists(), str(plot_path))
         self.assertGreater(plot_path.stat().st_size, 0, str(plot_path))
+        self.assertTrue(
+            fixed_point_distribution_path.exists(),
+            str(fixed_point_distribution_path),
+        )
+        self.assertEqual(fixed_point_result["s0"].shape, (n_models,))
         if show_plot:
             show_plots_non_blocking()
             return None
@@ -1182,18 +1569,20 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
     def _fit_one_saved_debug_distribution(
         self,
         variable_name,
-        rate_hz=6.0,
+        rate_hz=8.0,
+        number_of_gaussians=2,
         file_format="csv",
         show_plot=True,
     ):
-        histogram_path = (
+        fit_sample_path = (
             DEBUG_DISTRIBUTION_DIR
             / f"{rate_hz:g}_Hz"
-            / f"{variable_name}_histogram.{file_format}"
+            / f"{variable_name}_fit_sample.{file_format}"
         )
-        plot_path, fit = fit_saved_debug_histogram(
-            histogram_path,
+        plot_path, fit = fit_saved_debug_sample(
+            fit_sample_path,
             variable_name,
+            number_of_gaussians=number_of_gaussians,
         )
         self.assertTrue(plot_path.exists(), str(plot_path))
         self.assertTrue(np.all(np.isfinite(fit["means"])))
@@ -1213,17 +1602,17 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
         return self._fit_one_saved_debug_distribution("x_nmda")
 
     def test_fit_saved_g_ampa_distribution(self):
-        return self._fit_one_saved_debug_distribution("g_ampa_nS")
+        return self._fit_one_saved_debug_distribution("g_ampa_nS", rate_hz=80, number_of_gaussians=1)
 
     def test_fit_saved_voltage_distribution(self):
         return self._fit_one_saved_debug_distribution("voltage_mV")
 
-    def test_simulate_1000_ampa_nmda_single_compartments_multiple_r_es(self):
-        rates_hz = np.arange(1, 11, dtype=float)
+    def test_simulate_1_000_ampa_nmda_single_compartments_multiple_r_es(self):
+        rates_hz = np.arange(1, 50, dtype=float)
         # Every rate gets its own process and therefore its own independent
         # Brian2 scope.  n_jobs=-1 uses all CPUs available to joblib.
         completed_jobs = Parallel(
-            n_jobs=2,
+            n_jobs=3,
             backend="loky",
             return_as="generator_unordered",
         )(
@@ -1255,12 +1644,14 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
 def run_ampa_nmda_rate_in_worker(rate_hz):
     """Pickle-safe joblib entry point for one independent Brian2 rate run."""
     test_case = SimulateNMDASpikesUnderEIBalanceScriptTestCases(
-        methodName="test_simulate_10_000_ampa_nmda_single_compartments"
+        methodName="test_simulate_1_000_ampa_nmda_single_compartments"
     )
-    return test_case.test_simulate_10_000_ampa_nmda_single_compartments(
+    return test_case.test_simulate_1_000_ampa_nmda_single_compartments(
         r_e=float(rate_hz) * Hz,
         show_plot=False,
     )
+
+
 
 
 if __name__ == "__main__":
