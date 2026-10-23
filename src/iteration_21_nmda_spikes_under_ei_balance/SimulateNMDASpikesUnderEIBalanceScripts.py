@@ -1,5 +1,6 @@
 import json
 import csv
+import math
 import sys
 import unittest
 from dataclasses import dataclass
@@ -67,6 +68,37 @@ DEBUG_DISTRIBUTION_VARIABLES = {
     "voltage_mV": "voltage [mV]",
 }
 
+# Voltage, g_AMPA, g_NMDA, s_NMDA, x_NMDA, in plot row order.
+TRACE_DISTRIBUTION_GAUSSIAN_COMPONENTS = (2, 1, 1, 1, 2)
+
+TRACE_MODEL_EQUATIONS = (
+    (
+        r"$C_m\,\frac{dV}{dt}=-g_L(V-E_L)-g_{AMPA}(V-E_E)-g_{NMDA}(V-E_E)$"
+    ),
+    (
+        r"$\frac{dg_{AMPA}}{dt}=-\frac{g_{AMPA}}{\tau_{AMPA}}+w_{AMPA}\sum_k\delta(t-t_k)$"
+    ),
+    (
+        r"$g_{NMDA}=g_{NMDA,max}s_{NMDA}\,\sigma_{Mg}(V) \sigma_{Mg}(V)=\left(1+e^{-0.08V/\mathrm{mV}}Mg/3.57\right)^{-1}$"
+    ),
+    r"$\frac{ds_{NMDA}}{dt}=-\frac{s_{NMDA}}{\tau_{decay}}+\alpha_{NMDA}x_{NMDA}$",
+    (
+        r"$\frac{dx_{NMDA}}{dt}=-\frac{x_{NMDA}}{\tau_{rise}}+w_{NMDA}\sum_k\delta(t-t_k)$"
+    ),
+)
+
+TRACE_DYNAMIC_MAGNESIUM_MODEL_EQUATIONS = (
+    TRACE_MODEL_EQUATIONS[0],
+    TRACE_MODEL_EQUATIONS[1],
+    (
+        r"$g_{NMDA}=g_{NMDA,max}s_{NMDA}\,\sigma_{Mg}(t)$" "\n"
+        r"$\tau_{\sigma}\frac{d\sigma_{Mg}}{dt}=\sigma_{\infty}(V)-\sigma_{Mg}$" "\n"
+        r"$\sigma_{\infty}(V)=\left(1+e^{-0.08V/\mathrm{mV}}Mg/3.57\right)^{-1}$"
+    ),
+    TRACE_MODEL_EQUATIONS[3],
+    TRACE_MODEL_EQUATIONS[4],
+)
+
 
 @dataclass(frozen=True)
 class DebugHistogramSaveConfiguration:
@@ -131,7 +163,27 @@ dx_NMDA/dt = -x_NMDA / tau_NMDA_rise : 1
 ds_NMDA/dt = -s_NMDA / tau_NMDA_decay
              + alpha_NMDA * x_NMDA : 1
 
-sigma_Mg = 1 / (1 + exp(-0.08 * V / mV) * Mg / 3.57) : 1
+sigma_Mg_inf = 1 / (1 + exp(-0.08 * V / mV) * Mg / 3.57) : 1
+sigma_Mg = sigma_Mg_inf : 1
+g_NMDA_open = g_NMDA_max * s_NMDA : siemens
+g_NMDA = g_NMDA_open * sigma_Mg : siemens
+
+I_leak = g_L * (V - E_L) : amp
+I_AMPA = g_e * (V - E_E) : amp
+I_NMDA = g_NMDA * (V - E_E) : amp
+"""
+
+
+AMPA_NMDA_DYNAMIC_MAGNESIUM_MODEL = """
+dV/dt = (-I_leak - I_AMPA - I_NMDA) / C_m : volt
+
+dg_e/dt = -g_e / tau_AMPA : siemens
+dx_NMDA/dt = -x_NMDA / tau_NMDA_rise : 1
+ds_NMDA/dt = -s_NMDA / tau_NMDA_decay
+             + alpha_NMDA * x_NMDA : 1
+
+sigma_Mg_inf = 1 / (1 + exp(-0.08 * V / mV) * Mg / 3.57) : 1
+dsigma_Mg/dt = (sigma_Mg_inf - sigma_Mg) / tau_sigma_Mg : 1
 g_NMDA_open = g_NMDA_max * s_NMDA : siemens
 g_NMDA = g_NMDA_open * sigma_Mg : siemens
 
@@ -163,6 +215,7 @@ def simulate_ampa_nmda_single_compartment_ensemble(
     n_NMDA,
     w_NMDA,
     Mg,
+    magnesium_block_tau=None,
 ):
     """Simulate independent copies and return voltage samples and statistics.
 
@@ -174,6 +227,12 @@ def simulate_ampa_nmda_single_compartment_ensemble(
     seed(random_seed)
     clock = Clock(dt=dt)
     g_NMDA = g_NMDA_max / n_NMDA
+    dynamic_magnesium_block = magnesium_block_tau is not None
+    model_equations = (
+        AMPA_NMDA_DYNAMIC_MAGNESIUM_MODEL
+        if dynamic_magnesium_block
+        else AMPA_NMDA_SINGLE_COMPARTMENT_MODEL
+    )
     namespace = {
         "C_m": C_m,
         "g_L": g_L,
@@ -186,9 +245,11 @@ def simulate_ampa_nmda_single_compartment_ensemble(
         "g_NMDA_max": g_NMDA,
         "Mg": Mg,
     }
+    if dynamic_magnesium_block:
+        namespace["tau_sigma_Mg"] = magnesium_block_tau
     compartments = NeuronGroup(
         n_models,
-        AMPA_NMDA_SINGLE_COMPARTMENT_MODEL,
+        model_equations,
         method="euler",
         namespace=namespace,
         clock=clock,
@@ -198,6 +259,11 @@ def simulate_ampa_nmda_single_compartment_ensemble(
     compartments.g_e = 0 * nS
     compartments.x_NMDA = 0
     compartments.s_NMDA = 0
+    if dynamic_magnesium_block:
+        resting_sigma_mg = 1.0 / (
+            1.0 + np.exp(-0.08 * float(E_L / mV)) * float(Mg) / 3.57
+        )
+        compartments.sigma_Mg = resting_sigma_mg
 
     ampa_input = PoissonInput(
         compartments, "g_e", N=n_e, rate=r_e, weight=w_AMPA
@@ -207,7 +273,7 @@ def simulate_ampa_nmda_single_compartment_ensemble(
     )
     state = StateMonitor(
         compartments,
-        ["V", "g_e", "g_NMDA", "s_NMDA", "x_NMDA"],
+        ["V", "g_e", "g_NMDA", "s_NMDA", "x_NMDA", "sigma_Mg", "sigma_Mg_inf"],
         record=True,
         clock=clock,
     )
@@ -219,16 +285,28 @@ def simulate_ampa_nmda_single_compartment_ensemble(
     effective_g_nmda_nS = np.asarray(state.g_NMDA[:, sample_mask] / nS)
     s_nmda = np.asarray(state.s_NMDA[:, sample_mask])
     x_nmda = np.asarray(state.x_NMDA[:, sample_mask])
+    sigma_mg = np.asarray(state.sigma_Mg[:, sample_mask])
+    sigma_mg_inf = np.asarray(state.sigma_Mg_inf[:, sample_mask])
     per_model_mean_mV = np.mean(voltage_mV, axis=1)
     per_model_variance_mV2 = np.var(voltage_mV, axis=1)
     return {
-        "model_equations": AMPA_NMDA_SINGLE_COMPARTMENT_MODEL,
+        "model_equations": model_equations,
+        "trace_model_equations": (
+            TRACE_DYNAMIC_MAGNESIUM_MODEL_EQUATIONS
+            if dynamic_magnesium_block
+            else TRACE_MODEL_EQUATIONS
+        ),
+        "magnesium_block_tau_ms": (
+            float(magnesium_block_tau / ms) if dynamic_magnesium_block else None
+        ),
         "time_ms": np.asarray(state.t[sample_mask] / ms),
         "voltage_mV": voltage_mV,
         "g_ampa_nS": g_ampa_nS,
         "effective_g_nmda_nS": effective_g_nmda_nS,
         "s_nmda": s_nmda,
         "x_nmda": x_nmda,
+        "sigma_mg": sigma_mg,
+        "sigma_mg_inf": sigma_mg_inf,
         "per_model_mean_mV": per_model_mean_mV,
         "per_model_variance_mV2": per_model_variance_mV2,
         "ensemble_mean_mV": float(np.mean(voltage_mV)),
@@ -785,11 +863,127 @@ def fit_single_exponential(values, random_seed=21, max_samples=20_000):
     }
 
 
+def exponential_shot_noise_cumulants(rate_hz, tau_ms, amplitude):
+    """Return stationary cumulants 1..4 for exponential Poisson shot noise."""
+    rate_tau = float(rate_hz) * float(tau_ms) / 1000.0
+    return np.asarray(
+        [rate_tau * float(amplitude) ** order / order for order in range(1, 5)]
+    )
+
+
+def filtered_nmda_shot_noise_cumulants(
+    rate_hz, tau_rise_ms, tau_decay_ms, alpha_per_ms, weight
+):
+    """Cumulants 1..4 of s for Poisson-driven linear x-to-s NMDA kinetics."""
+    tau_rise = float(tau_rise_ms) / 1000.0
+    tau_decay = float(tau_decay_ms) / 1000.0
+    alpha = float(alpha_per_ms) * 1000.0
+    amplitude_scale = (
+        alpha * float(weight) * tau_rise * tau_decay / (tau_decay - tau_rise)
+    )
+    cumulants = []
+    for order in range(1, 5):
+        kernel_power_integral = amplitude_scale**order * sum(
+            (-1) ** index
+            * math.comb(order, index)
+            / ((order - index) / tau_decay + index / tau_rise)
+            for index in range(order + 1)
+        )
+        cumulants.append(float(rate_hz) * kernel_power_integral)
+    return np.asarray(cumulants)
+
+
+def _estimated_cumulants(values, max_samples=500_000, random_seed=0):
+    values = np.asarray(values, dtype=float).ravel()
+    if values.size > max_samples:
+        indices = np.random.default_rng(random_seed).choice(
+            values.size, size=max_samples, replace=False
+        )
+        values = values[indices]
+    centered = values - np.mean(values)
+    variance = float(np.mean(centered**2))
+    third = float(np.mean(centered**3))
+    fourth = float(np.mean(centered**4) - 3.0 * variance**2)
+    return np.asarray([float(np.mean(values)), variance, third, fourth])
+
+
+def _with_standardized_higher_cumulants(theoretical, empirical):
+    return {
+        "theoretical_cumulants": theoretical,
+        "empirical_cumulants": empirical,
+        "theoretical_skewness": float(theoretical[2] / theoretical[1] ** 1.5),
+        "empirical_skewness": float(empirical[2] / empirical[1] ** 1.5),
+        "theoretical_excess_kurtosis": float(theoretical[3] / theoretical[1] ** 2),
+        "empirical_excess_kurtosis": float(empirical[3] / empirical[1] ** 2),
+    }
+
+
+def compute_shot_noise_gaussianity_summary(
+    result,
+    *,
+    ampa_input_rate_hz,
+    nmda_input_rate_hz,
+    ampa_tau_ms,
+    ampa_weight_nS,
+    nmda_tau_rise_ms,
+    nmda_tau_decay_ms,
+    nmda_alpha_per_ms,
+    nmda_weight,
+    nmda_open_conductance_scale_nS,
+):
+    """Compare theoretical and sampled higher cumulants with Gaussian zeros."""
+    x_theory = exponential_shot_noise_cumulants(
+        nmda_input_rate_hz, nmda_tau_rise_ms, nmda_weight
+    )
+    s_theory = filtered_nmda_shot_noise_cumulants(
+        nmda_input_rate_hz,
+        nmda_tau_rise_ms,
+        nmda_tau_decay_ms,
+        nmda_alpha_per_ms,
+        nmda_weight,
+    )
+    g_nmda_theory = s_theory * np.asarray(
+        [nmda_open_conductance_scale_nS**order for order in range(1, 5)]
+    )
+    g_ampa_theory = exponential_shot_noise_cumulants(
+        ampa_input_rate_hz, ampa_tau_ms, ampa_weight_nS
+    )
+    pairs = {
+        "x": (x_theory, result["x_nmda"]),
+        "s": (s_theory, result["s_nmda"]),
+        # Theory is for open g_NMDA; data include the voltage-dependent Mg block.
+        "g_NMDA": (g_nmda_theory, result["effective_g_nmda_nS"]),
+        "g_AMPA": (g_ampa_theory, result["g_ampa_nS"]),
+    }
+    return {
+        name: _with_standardized_higher_cumulants(
+            theoretical, _estimated_cumulants(values)
+        )
+        for name, (theoretical, values) in pairs.items()
+    }
+
+
+def format_shot_noise_gaussianity_rows(summary):
+    """Return table-like text aligned with V, g_AMPA, g_NMDA, s, and x rows."""
+    rows = ["not evaluated for V"]
+    for name in ("g_AMPA", "g_NMDA", "s", "x"):
+        values = summary[name]
+        theory_label = "open theory" if name == "g_NMDA" else "theory"
+        rows.append(
+            f"γ₁  {theory_label:<11} {values['theoretical_skewness']:>8.3g}\n"
+            f"    data        {values['empirical_skewness']:>8.3g}\n"
+            f"γ₂  {theory_label:<11} {values['theoretical_excess_kurtosis']:>8.3g}\n"
+            f"    data        {values['empirical_excess_kurtosis']:>8.3g}"
+        )
+    return rows
+
+
 def plot_chosen_ampa_nmda_traces(
     result,
     chosen_model_indices=(0, 1, 2),
     output_path=OUTPUT_DIR / "ampa_nmda_three_chosen_traces.png",
     figure_title=None,
+    gaussianity_summary=None,
 ):
     """Plot V, AMPA, and Mg-blocked NMDA conductance for chosen models."""
     output_path = Path(output_path)
@@ -797,11 +991,11 @@ def plot_chosen_ampa_nmda_traces(
     time_ms = result["time_ms"]
     fig, axes = plt.subplots(
         5,
-        3,
-        figsize=(15, 14),
+        4,
+        figsize=(20, 14),
         sharex=False,
         sharey=False,
-        gridspec_kw={"width_ratios": [4, 1, 1.35]},
+        gridspec_kw={"width_ratios": [4, 1, 1.35, 3.2]},
     )
     trace_axes = axes[:, 0]
     (
@@ -812,6 +1006,7 @@ def plot_chosen_ampa_nmda_traces(
         x_nmda_histogram_ax,
     ) = axes[:, 1]
     fit_axes = axes[:, 2]
+    gaussianity_axes = axes[:, 3]
     for model_index in chosen_model_indices:
         label = f"model {model_index}"
         trace_axes[0].plot(time_ms, result["voltage_mV"][model_index], label=label)
@@ -873,9 +1068,11 @@ def plot_chosen_ampa_nmda_traces(
         result["x_nmda"],
     )
     distribution_colors = ("tab:green", "tab:blue", "tab:orange", "tab:red", "tab:purple")
-    fit_kinds = ("gaussian_mixture",) * 5
-    for fit_axis, values, color, fit_kind in zip(
-        fit_axes, distribution_values, distribution_colors, fit_kinds
+    for fit_axis, values, color, number_of_gaussians in zip(
+        fit_axes,
+        distribution_values,
+        distribution_colors,
+        TRACE_DISTRIBUTION_GAUSSIAN_COMPONENTS,
     ):
         fit_axis.hist(
             np.asarray(values).ravel(),
@@ -884,26 +1081,25 @@ def plot_chosen_ampa_nmda_traces(
             orientation="horizontal",
             color="0.85",
         )
-        if fit_kind == "exponential":
-            fit = fit_single_exponential(values)
-            fit_axis.plot(fit["density"], fit["grid"], color=color, linewidth=2)
-            parameter_text = f"scale={fit['scale']:.3g}"
-        else:
-            fit = fit_gaussian_mixture(values)
-            for component_index in range(fit["component_density"].shape[1]):
-                fit_axis.plot(
-                    fit["component_density"][:, component_index],
-                    fit["grid"],
-                    linestyle=":",
-                    color=color,
-                    alpha=0.7,
-                )
+        fit = fit_gaussian_mixture(
+            values, number_of_gaussians=number_of_gaussians
+        )
+        for component_index in range(fit["component_density"].shape[1]):
             fit_axis.plot(
-                fit["mixture_density"], fit["grid"], color=color, linewidth=2
+                fit["component_density"][:, component_index],
+                fit["grid"],
+                linestyle=":",
+                color=color,
+                alpha=0.7,
             )
-            parameter_text = (
-                f"{fit['component_density'].shape[1]}-Gaussian mixture"
-            )
+        fit_axis.plot(
+            fit["mixture_density"], fit["grid"], color=color, linewidth=2
+        )
+        parameter_text = (
+            "single Gaussian"
+            if number_of_gaussians == 1
+            else f"{number_of_gaussians}-Gaussian mixture"
+        )
         fit_axis.set_xlabel("density")
         fit_axis.text(
             0.98,
@@ -924,6 +1120,43 @@ def plot_chosen_ampa_nmda_traces(
     trace_axes[0].set_title("Three single-compartment realizations")
     voltage_histogram_ax.set_title("distribution", fontsize=10)
     fit_axes[0].set_title("distribution fit", fontsize=10)
+    gaussianity_axes[0].set_title(
+        "model equation and higher cumulants\n"
+        "(Gaussian reference: γ₁ = γ₂ = 0)",
+        fontsize=10,
+    )
+    gaussianity_rows = (
+        format_shot_noise_gaussianity_rows(gaussianity_summary)
+        if gaussianity_summary is not None
+        else ["not available"] * 5
+    )
+    trace_model_equations = result.get(
+        "trace_model_equations", TRACE_MODEL_EQUATIONS
+    )
+    for row_index, (gaussianity_axis, row_text, equation) in enumerate(
+        zip(gaussianity_axes, gaussianity_rows, trace_model_equations)
+    ):
+        gaussianity_axis.axis("off")
+        gaussianity_axis.text(
+            0.02,
+            0.72 if row_index else 0.5,
+            equation,
+            transform=gaussianity_axis.transAxes,
+            ha="left",
+            va="center",
+            fontsize=9,
+        )
+        if row_index:
+            gaussianity_axis.text(
+                0.02,
+                0.27,
+                row_text,
+                transform=gaussianity_axis.transAxes,
+                ha="left",
+                va="center",
+                fontsize=8,
+                fontfamily="monospace",
+            )
     voltage_histogram_ax.set_xlabel("density")
     ampa_histogram_ax.set_xlabel("density")
     nmda_histogram_ax.set_xlabel("density")
@@ -933,7 +1166,7 @@ def plot_chosen_ampa_nmda_traces(
         axis.legend(loc="best")
     if figure_title:
         fig.suptitle(figure_title, fontsize=10, y=0.995)
-        fig.tight_layout(rect=(0, 0, 1, 0.95))
+        fig.tight_layout(rect=(0, 0, 1, 0.92))
     else:
         fig.tight_layout()
     fig.savefig(output_path, dpi=200, bbox_inches="tight")
@@ -997,6 +1230,114 @@ def compute_per_unit_s0_and_fixed_points(
     }
 
 
+def save_voltage_fixed_point_distribution_data(
+    result,
+    fixed_point_result,
+    output_dir,
+    *,
+    metadata,
+    voltage_sample_size=500_000,
+    random_seed=0,
+):
+    """Save tidy CSV inputs needed to reproduce voltage/fixed-point plots."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    metadata_path = output_dir / "metadata.csv"
+    with metadata_path.open("w", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(("name", "value"))
+        for name, value in metadata.items():
+            writer.writerow((name, "" if value is None else value))
+
+    s0 = np.asarray(fixed_point_result["s0"], dtype=float)
+    g_ampa_0 = np.mean(np.asarray(result["g_ampa_nS"], dtype=float), axis=1)
+    voltage_mean = np.asarray(
+        result.get(
+            "per_model_mean_mV",
+            np.mean(np.asarray(result["voltage_mV"], dtype=float), axis=1),
+        ),
+        dtype=float,
+    )
+    per_unit_path = output_dir / "per_unit_steady_state_and_fixed_points.csv"
+    fieldnames = (
+        "unit_index",
+        "s0_empirical",
+        "g_ampa_0_nS_empirical",
+        "voltage_mean_mV",
+        "open_g_nmda_nS",
+        "lower_fixed_point_mV",
+        "upper_fixed_point_mV",
+    )
+    with per_unit_path.open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer.writeheader()
+        for unit_index in range(s0.size):
+            writer.writerow(
+                {
+                    "unit_index": unit_index,
+                    "s0_empirical": s0[unit_index],
+                    "g_ampa_0_nS_empirical": g_ampa_0[unit_index],
+                    "voltage_mean_mV": voltage_mean[unit_index],
+                    "open_g_nmda_nS": fixed_point_result["open_g_nmda_nS"][unit_index],
+                    "lower_fixed_point_mV": fixed_point_result["lower_fixed_point_mV"][unit_index],
+                    "upper_fixed_point_mV": fixed_point_result["upper_fixed_point_mV"][unit_index],
+                }
+            )
+
+    voltage_mV = np.asarray(result["voltage_mV"], dtype=float).ravel()
+    sample_size = min(voltage_mV.size, int(voltage_sample_size))
+    sample_indices = np.random.default_rng(random_seed).choice(
+        voltage_mV.size, size=sample_size, replace=False
+    )
+    voltage_sample_path = output_dir / "voltage_histogram_sample.csv"
+    with voltage_sample_path.open("w", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(("flat_sample_index", "voltage_mV"))
+        writer.writerows(zip(sample_indices, voltage_mV[sample_indices]))
+
+    return {
+        "metadata": metadata_path,
+        "per_unit": per_unit_path,
+        "voltage_sample": voltage_sample_path,
+    }
+
+
+def load_voltage_fixed_point_distribution_data(output_dir):
+    """Load the CSV export into the structures accepted by the plotter."""
+    output_dir = Path(output_dir)
+    per_unit_path = output_dir / "per_unit_steady_state_and_fixed_points.csv"
+    voltage_sample_path = output_dir / "voltage_histogram_sample.csv"
+
+    with per_unit_path.open(newline="") as stream:
+        rows = list(csv.DictReader(stream))
+
+    def optional_float(value):
+        return None if value == "" else float(value)
+
+    fixed_point_result = {
+        "s0": np.asarray([float(row["s0_empirical"]) for row in rows]),
+        "open_g_nmda_nS": np.asarray(
+            [float(row["open_g_nmda_nS"]) for row in rows]
+        ),
+        "lower_fixed_point_mV": [
+            optional_float(row["lower_fixed_point_mV"]) for row in rows
+        ],
+        "upper_fixed_point_mV": [
+            optional_float(row["upper_fixed_point_mV"]) for row in rows
+        ],
+    }
+    voltage_rows = np.loadtxt(
+        voltage_sample_path,
+        delimiter=",",
+        skiprows=1,
+        usecols=(0, 1),
+        ndmin=2,
+    )
+    voltage_mV = voltage_rows[np.argsort(voltage_rows[:, 0]), 1]
+    return {"voltage_mV": voltage_mV}, fixed_point_result
+
+
 def plot_voltage_and_fixed_point_distributions(
     result,
     fixed_point_result,
@@ -1012,39 +1353,56 @@ def plot_voltage_and_fixed_point_distributions(
     finite_upper = np.asarray(
         [value for value in upper if value is not None], dtype=float
     )
-    all_values = [voltage_mV]
-    if finite_lower.size:
-        all_values.append(finite_lower)
-    if finite_upper.size:
-        all_values.append(finite_upper)
-    combined = np.concatenate(all_values)
-    bin_edges = np.linspace(float(np.min(combined)), float(np.max(combined)), 151)
+    voltage_sample_size = min(voltage_mV.size, 500_000)
+    voltage_sample_indices = np.random.default_rng(0).choice(
+        voltage_mV.size, size=voltage_sample_size, replace=False
+    )
+    sampled_voltage_mV = voltage_mV[voltage_sample_indices]
+    total_fixed_point_count = finite_lower.size + finite_upper.size
+
+    def fixed_point_histogram_parameters(values):
+        """Return bins/weights whose density area is this branch's joint mass."""
+        bin_edges = np.histogram_bin_edges(values, bins=150)
+        bin_width = bin_edges[1] - bin_edges[0]
+        weights = np.full(
+            values.size,
+            1.0 / (total_fixed_point_count * bin_width),
+            dtype=float,
+        )
+        return bin_edges, weights
 
     figure, axis = plt.subplots(figsize=(11, 7))
     axis.hist(
-        voltage_mV,
-        bins=bin_edges,
+        sampled_voltage_mV,
+        bins=150,
         density=True,
-        histtype="stepfilled",
-        color="0.75",
-        alpha=0.55,
-        label=f"simulated V (n={voltage_mV.size:,})",
+        histtype="step",
+        linewidth=2,
+        color="tab:green",
+        label=(
+            f"simulated V (sample n={sampled_voltage_mV.size:,}; "
+            f"total n={voltage_mV.size:,})"
+        ),
     )
     if finite_lower.size:
+        lower_bin_edges, lower_weights = fixed_point_histogram_parameters(finite_lower)
         axis.hist(
             finite_lower,
-            bins=bin_edges,
-            density=True,
+            bins=lower_bin_edges,
+            weights=lower_weights,
+            density=False,
             histtype="step",
             linewidth=2,
             color="tab:blue",
             label=f"lower stable fixed point (n={finite_lower.size:,})",
         )
     if finite_upper.size:
+        upper_bin_edges, upper_weights = fixed_point_histogram_parameters(finite_upper)
         axis.hist(
             finite_upper,
-            bins=bin_edges,
-            density=True,
+            bins=upper_bin_edges,
+            weights=upper_weights,
+            density=False,
             histtype="step",
             linewidth=2,
             color="tab:orange",
@@ -1403,10 +1761,14 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
         self.assertTrue(json_path.exists(), str(json_path))
         self.assertGreater(json_path.stat().st_size, 0, str(json_path))
 
+    def test_simulate_1000_ampa_nmda_with_magnesium_tau(self):
+        self.test_simulate_1_000_ampa_nmda_single_compartments(tau_mg = 100 * ms)
+
     def test_simulate_1_000_ampa_nmda_single_compartments(
         self,
-        r_e=8 * Hz,
-        show_plot=True,
+        r_e=20 * Hz,
+        tau_mg=None,
+        show_plot=True
     ):
 
         # Principal experiment inputs are intentionally plain and local: edit
@@ -1415,7 +1777,7 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
         n_e = 800
         n_NMDA = 10
         simulation_time = 1_000 * ms
-        burn_in = 100 * ms
+        burn_in = 500 * ms
         dt = 0.1 * ms
         random_seed = 21
         chosen_model_indices = (0, 1, 2)
@@ -1459,6 +1821,7 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
             n_NMDA=n_NMDA,
             w_NMDA=w_NMDA,
             Mg=Mg,
+            magnesium_block_tau=tau_mg
         )
 
         fixed_point_result = compute_per_unit_s0_and_fixed_points(
@@ -1470,6 +1833,63 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
             e_excitatory_mV=float(E_E / mV),
             mg=Mg,
         )
+        theoretical_s0_mean = filtered_nmda_shot_noise_cumulants(
+            float(n_NMDA * r_e / Hz),
+            float(tau_NMDA_rise / ms),
+            float(tau_NMDA_decay / ms),
+            float(alpha_NMDA / kHz),
+            float(w_NMDA),
+        )[0]
+        theoretical_g_ampa_0_nS_mean = exponential_shot_noise_cumulants(
+            float(n_e * r_e / Hz),
+            float(tau_AMPA / ms),
+            float(w_AMPA / nS),
+        )[0]
+        model_name = "dynamic_magnesium" if tau_mg is not None else "instantaneous_magnesium"
+        distribution_data_paths = save_voltage_fixed_point_distribution_data(
+            result,
+            fixed_point_result,
+            OUTPUT_DIR
+            / "voltage_fixed_point_data"
+            / f"{float(r_e / Hz):g}_Hz_{model_name}",
+            metadata={
+                "model_name": model_name,
+                "model_equations": result["model_equations"],
+                "n_models": n_models,
+                "n_e": n_e,
+                "n_nmda": n_NMDA,
+                "simulation_time_ms": float(simulation_time / ms),
+                "burn_in_ms": float(burn_in / ms),
+                "dt_ms": float(dt / ms),
+                "random_seed": random_seed,
+                "input_rate_per_source_hz": float(r_e / Hz),
+                "ampa_total_input_rate_hz": float(n_e * r_e / Hz),
+                "nmda_total_input_rate_hz": float(n_NMDA * r_e / Hz),
+                "capacitance_nF": float(C_m / nF),
+                "g_leak_nS": float(g_L / nS),
+                "e_leak_mV": float(E_L / mV),
+                "e_excitatory_mV": float(E_E / mV),
+                "tau_ampa_ms": float(tau_AMPA / ms),
+                "w_ampa_nS": float(w_AMPA / nS),
+                "tau_nmda_rise_ms": float(tau_NMDA_rise / ms),
+                "tau_nmda_decay_ms": float(tau_NMDA_decay / ms),
+                "alpha_nmda_per_ms": float(alpha_NMDA / kHz),
+                "g_nmda_max_nS": float(g_NMDA_max / nS),
+                "w_nmda": float(w_NMDA),
+                "magnesium": Mg,
+                "magnesium_block_tau_ms": result["magnesium_block_tau_ms"],
+                "theoretical_s0_mean": theoretical_s0_mean,
+                "theoretical_g_ampa_0_nS_mean": theoretical_g_ampa_0_nS_mean,
+                "empirical_ensemble_voltage_mean_mV": result["ensemble_mean_mV"],
+                "empirical_ensemble_voltage_variance_mV2": result["ensemble_variance_mV2"],
+                "voltage_histogram_sample_size": min(result["voltage_mV"].size, 500_000),
+                "voltage_histogram_sample_seed": 0,
+                "histogram_bin_count": 150,
+                "fixed_point_normalization": "joint lower+upper probability mass",
+            },
+        )
+        for data_name, data_path in distribution_data_paths.items():
+            print(f"Saved fixed-point analysis {data_name}: {data_path}")
         fixed_point_distribution_path = plot_voltage_and_fixed_point_distributions(
             result,
             fixed_point_result,
@@ -1522,6 +1942,18 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
             f"V = {result['ensemble_mean_mV']:.3f} mV, "
             f"variance = {result['ensemble_variance_mV2']:.3f} mV^2"
         )
+        gaussianity_summary = compute_shot_noise_gaussianity_summary(
+            result,
+            ampa_input_rate_hz=float(n_e * r_e / Hz),
+            nmda_input_rate_hz=float(n_NMDA * r_e / Hz),
+            ampa_tau_ms=float(tau_AMPA / ms),
+            ampa_weight_nS=float(w_AMPA / nS),
+            nmda_tau_rise_ms=float(tau_NMDA_rise / ms),
+            nmda_tau_decay_ms=float(tau_NMDA_decay / ms),
+            nmda_alpha_per_ms=float(alpha_NMDA / kHz),
+            nmda_weight=float(w_NMDA),
+            nmda_open_conductance_scale_nS=float(g_NMDA_max / nS) / n_NMDA,
+        )
         figure_title = (
             f"AMPA–NMDA ensemble: N={n_models:,}, r_e={float(r_e / Hz):g} Hz, "
             f"N_e={n_e}, N_NMDA={n_NMDA}, T={float(simulation_time / ms):g} ms, "
@@ -1533,7 +1965,8 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
             f"tau_d={float(tau_NMDA_decay / ms):.4g} ms, "
             f"alpha={float(alpha_NMDA / kHz):.4g} kHz, "
             f"g_max={float(g_NMDA_max / nS):.4g} nS, w={w_NMDA:g}, "
-            f"Mg={Mg:g}; distributions: two-Gaussian mixture"
+            f"Mg={Mg:g}; fits: g_AMPA/g_NMDA/s_NMDA single Gaussian, "
+            f"V/x_NMDA two-Gaussian"
         )
         plot_path = plot_chosen_ampa_nmda_traces(
             result,
@@ -1543,6 +1976,7 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
                 / f"ampa_nmda_three_chosen_traces_{float(r_e / Hz):g}_Hz.png"
             ),
             figure_title=figure_title,
+            gaussianity_summary=gaussianity_summary,
         )
 
         self.assertEqual(result["voltage_mV"].shape[0], n_models)
@@ -1650,6 +2084,27 @@ def run_ampa_nmda_rate_in_worker(rate_hz):
         r_e=float(rate_hz) * Hz,
         show_plot=False,
     )
+
+class UnderstandLambertRootsComingFromSimulations(unittest.TestCase):
+
+    def test_roots_distribution_for_simulation(self):
+        saved_run_dir = (
+            OUTPUT_DIR
+            / "voltage_fixed_point_data"
+            / "20_Hz_instantaneous_magnesium"
+        )
+        result, fixed_point_result = load_voltage_fixed_point_distribution_data(
+            saved_run_dir
+        )
+        plot_path = plot_voltage_and_fixed_point_distributions(
+            result,
+            fixed_point_result,
+            saved_run_dir / "voltage_vs_fixed_point_distributions_from_csv.png",
+        )
+
+        self.assertTrue(plot_path.exists(), str(plot_path))
+        self.assertGreater(plot_path.stat().st_size, 0, str(plot_path))
+        show_plots_non_blocking()
 
 
 
