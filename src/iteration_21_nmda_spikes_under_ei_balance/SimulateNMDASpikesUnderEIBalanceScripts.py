@@ -3,12 +3,13 @@ import csv
 import math
 import sys
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import sympy as sp
+from brian2.units import pfarad
 from joblib import Parallel, delayed
 from scipy.special import logsumexp, ndtr
 from scipy.stats import kurtosis, norm, skew, shapiro
@@ -126,6 +127,136 @@ class DebugHistogramSaveConfiguration:
         return [key for key, selected in flags.items() if selected]
 
 
+@dataclass(frozen=True)
+class AmpaNmdaExperimentConfig:
+    """Complete, reusable definition of one AMPA–NMDA ensemble experiment."""
+
+    n_models: int
+    n_e: int
+    n_nmda: int
+    simulation_time: object
+    burn_in: object
+    dt: object
+    random_seed: int
+    r_e: object
+    C_m: object
+    g_L: object
+    E_L: object
+    E_E: object
+    tau_ampa: object
+    w_ampa: object
+    tau_nmda_rise: object
+    tau_nmda_decay: object
+    alpha_nmda: object
+    g_nmda_max: object
+    w_nmda: float
+    magnesium: float
+    magnesium_block_tau: object = None
+
+    def with_property(self, **changes):
+        """Return a copy with only the named configuration fields replaced."""
+        return replace(self, **changes)
+
+    @classmethod
+    def from_fitted_apic20(cls, *, r_e=20 * Hz, magnesium_block_tau=None):
+        fitted = read_fitted_apic20_parameters_from_csv()
+        return cls(
+            n_models=1_000, n_e=800, n_nmda=10,
+            simulation_time=1_000 * ms, burn_in=500 * ms, dt=0.1 * ms,
+            random_seed=21, r_e=r_e,
+            C_m=fitted.capacitance_nF * nF,
+            g_L=fitted.g_leak_nS * nS,
+            E_L=fitted.e_leak_mV * mV,
+            E_E=fitted.e_excitatory_mV * mV,
+            tau_ampa=2 * ms, w_ampa=0.05 * nS,
+            tau_nmda_rise=fitted.tau_rise_ms * ms,
+            tau_nmda_decay=fitted.tau_decay_ms * ms,
+            alpha_nmda=fitted.alpha_per_ms / ms,
+            g_nmda_max=fitted.g_nmda_max_nS * nS,
+            w_nmda=fitted.spike_weight, magnesium=1.0,
+            magnesium_block_tau=magnesium_block_tau,
+        )
+
+    @classmethod
+    def from_metadata(cls, metadata):
+        value = lambda name: float(metadata[name])
+        tau_sigma = metadata.get("magnesium_block_tau_ms", "")
+        return cls(
+            n_models=int(metadata["n_models"]), n_e=int(metadata["n_e"]),
+            n_nmda=int(metadata["n_nmda"]),
+            simulation_time=value("simulation_time_ms") * ms,
+            burn_in=value("burn_in_ms") * ms, dt=value("dt_ms") * ms,
+            random_seed=int(metadata["random_seed"]),
+            r_e=value("input_rate_per_source_hz") * Hz,
+            C_m=value("capacitance_nF") * nF, g_L=value("g_leak_nS") * nS,
+            E_L=value("e_leak_mV") * mV, E_E=value("e_excitatory_mV") * mV,
+            tau_ampa=value("tau_ampa_ms") * ms, w_ampa=value("w_ampa_nS") * nS,
+            tau_nmda_rise=value("tau_nmda_rise_ms") * ms,
+            tau_nmda_decay=value("tau_nmda_decay_ms") * ms,
+            alpha_nmda=value("alpha_nmda_per_ms") / ms,
+            g_nmda_max=value("g_nmda_max_nS") * nS,
+            w_nmda=value("w_nmda"), magnesium=value("magnesium"),
+            magnesium_block_tau=(float(tau_sigma) * ms if tau_sigma else None),
+        )
+
+    def build_metadata(self, result):
+        model_name = "dynamic_magnesium" if self.magnesium_block_tau is not None else "instantaneous_magnesium"
+        s0_theory = filtered_nmda_shot_noise_cumulants(
+            float(self.n_nmda * self.r_e / Hz), float(self.tau_nmda_rise / ms),
+            float(self.tau_nmda_decay / ms), float(self.alpha_nmda / kHz), self.w_nmda,
+        )[0]
+        g_ampa_theory = exponential_shot_noise_cumulants(
+            float(self.n_e * self.r_e / Hz), float(self.tau_ampa / ms),
+            float(self.w_ampa / nS),
+        )[0]
+        return {
+            "model_name": model_name, "model_equations": result["model_equations"],
+            "n_models": self.n_models, "n_e": self.n_e, "n_nmda": self.n_nmda,
+            "simulation_time_ms": float(self.simulation_time / ms),
+            "burn_in_ms": float(self.burn_in / ms), "dt_ms": float(self.dt / ms),
+            "random_seed": self.random_seed,
+            "input_rate_per_source_hz": float(self.r_e / Hz),
+            "ampa_total_input_rate_hz": float(self.n_e * self.r_e / Hz),
+            "nmda_total_input_rate_hz": float(self.n_nmda * self.r_e / Hz),
+            "capacitance_nF": float(self.C_m / nF), "g_leak_nS": float(self.g_L / nS),
+            "e_leak_mV": float(self.E_L / mV), "e_excitatory_mV": float(self.E_E / mV),
+            "tau_ampa_ms": float(self.tau_ampa / ms), "w_ampa_nS": float(self.w_ampa / nS),
+            "tau_nmda_rise_ms": float(self.tau_nmda_rise / ms),
+            "tau_nmda_decay_ms": float(self.tau_nmda_decay / ms),
+            "alpha_nmda_per_ms": float(self.alpha_nmda / kHz),
+            "g_nmda_max_nS": float(self.g_nmda_max / nS), "w_nmda": self.w_nmda,
+            "magnesium": self.magnesium,
+            "magnesium_block_tau_ms": result["magnesium_block_tau_ms"],
+            "theoretical_s0_mean": s0_theory,
+            "theoretical_g_ampa_0_nS_mean": g_ampa_theory,
+            "empirical_ensemble_voltage_mean_mV": result["ensemble_mean_mV"],
+            "empirical_ensemble_voltage_variance_mV2": result["ensemble_variance_mV2"],
+            "voltage_histogram_sample_size": min(result["voltage_mV"].size, 500_000),
+            "voltage_histogram_sample_seed": 0, "histogram_bin_count": 150,
+            "fixed_point_normalization": "joint lower+upper probability mass",
+        }
+
+
+@dataclass(frozen=True)
+class AmpaNmdaExperimentConfigFactoryBuilder:
+    """Immutable builder for explicit experiment variants in tests/runnables."""
+
+    configuration: AmpaNmdaExperimentConfig
+
+    @classmethod
+    def fitted_apic20(cls):
+        return cls(AmpaNmdaExperimentConfig.from_fitted_apic20())
+
+    def with_property(self, **changes):
+        return replace(
+            self,
+            configuration=self.configuration.with_property(**changes),
+        )
+
+    def build(self):
+        return self.configuration
+
+
 # Edit this configuration before running the 1,000-compartment runnable.
 # The camelCase name is retained because this is the requested runnable flag.
 saveDebugFile = DebugHistogramSaveConfiguration(
@@ -193,36 +324,22 @@ I_NMDA = g_NMDA * (V - E_E) : amp
 """
 
 
-def simulate_ampa_nmda_single_compartment_ensemble(
-    *,
-    n_models,
-    simulation_time,
-    burn_in,
-    dt,
-    random_seed,
-    C_m,
-    g_L,
-    E_L,
-    E_E,
-    tau_AMPA,
-    w_AMPA,
-    r_e,
-    n_e,
-    tau_NMDA_rise,
-    tau_NMDA_decay,
-    alpha_NMDA,
-    g_NMDA_max,
-    n_NMDA,
-    w_NMDA,
-    Mg,
-    magnesium_block_tau=None,
-):
+def simulate_ampa_nmda_single_compartment_ensemble(experiment):
     """Simulate independent copies and return voltage samples and statistics.
 
     ``n_e * r_e`` and ``n_NMDA * r_e`` are superposed Poisson rates for each
     compartment.  Brian2's ``PoissonInput`` gives every compartment an
     independent realization, so all 1,000 copies can be integrated together.
     """
+    n_models, n_e, n_NMDA = experiment.n_models, experiment.n_e, experiment.n_nmda
+    simulation_time, burn_in, dt = experiment.simulation_time, experiment.burn_in, experiment.dt
+    random_seed, r_e = experiment.random_seed, experiment.r_e
+    C_m, g_L, E_L, E_E = experiment.C_m, experiment.g_L, experiment.E_L, experiment.E_E
+    tau_AMPA, w_AMPA = experiment.tau_ampa, experiment.w_ampa
+    tau_NMDA_rise, tau_NMDA_decay = experiment.tau_nmda_rise, experiment.tau_nmda_decay
+    alpha_NMDA, g_NMDA_max = experiment.alpha_nmda, experiment.g_nmda_max
+    w_NMDA, Mg = experiment.w_nmda, experiment.magnesium
+    magnesium_block_tau = experiment.magnesium_block_tau
     start_scope()
     seed(random_seed)
     clock = Clock(dt=dt)
@@ -1176,26 +1293,64 @@ def plot_chosen_ampa_nmda_traces(
 def compute_per_unit_s0_and_fixed_points(
     result,
     *,
-    g_nmda_max_nS,
-    n_nmda,
-    g_leak_nS,
-    e_leak_mV,
-    e_excitatory_mV,
-    mg,
+    experiment=None,
+    g_nmda_max_nS=None, n_nmda=None, g_leak_nS=None,
+    e_leak_mV=None, e_excitatory_mV=None, mg=None,
 ):
     """Compute post-burn-in s0 and stable Lambert fixed points per unit."""
     s0 = np.mean(np.asarray(result["s_nmda"], dtype=float), axis=1)
+    g_ampa_zero_nS = (
+        np.mean(np.asarray(result["g_ampa_nS"], dtype=float), axis=1)
+        if "g_ampa_nS" in result
+        else np.zeros(s0.size)
+    )
+    return compute_fixed_points_from_per_unit_s0(
+        s0,
+        experiment=experiment,
+        g_ampa_zero_nS=g_ampa_zero_nS,
+        g_nmda_max_nS=g_nmda_max_nS,
+        n_nmda=n_nmda,
+        g_leak_nS=g_leak_nS,
+        e_leak_mV=e_leak_mV,
+        e_excitatory_mV=e_excitatory_mV,
+        mg=mg,
+    )
+
+
+def compute_fixed_points_from_per_unit_s0(
+    s0,
+    *,
+    experiment=None,
+    g_ampa_zero_nS=0.0,
+    g_nmda_max_nS=None, n_nmda=None, g_leak_nS=None,
+    e_leak_mV=None, e_excitatory_mV=None, mg=None,
+):
+    """Recompute stable fixed points from stored per-unit post-burn-in s0."""
+    if experiment is not None:
+        g_nmda_max_nS = float(experiment.g_nmda_max / nS)
+        n_nmda = experiment.n_nmda
+        g_leak_nS = float(experiment.g_L / nS)
+        e_leak_mV = float(experiment.E_L / mV)
+        e_excitatory_mV = float(experiment.E_E / mV)
+        mg = experiment.magnesium
+    s0 = np.asarray(s0, dtype=float)
+    g_ampa_zero_nS = np.broadcast_to(np.asarray(g_ampa_zero_nS, dtype=float), s0.shape)
     open_g_nmda_nS = (float(g_nmda_max_nS) / int(n_nmda)) * s0
     lower_fixed_point_mV = [None] * s0.size
     upper_fixed_point_mV = [None] * s0.size
     magnesium_coefficient = float(mg) / 3.57
-    voltage_separator_mV = 0.5 * (float(e_leak_mV) + float(e_excitatory_mV))
-
     for unit_index, g_n in enumerate(open_g_nmda_nS):
+        g_ampa_zero = g_ampa_zero_nS[unit_index]
+        effective_leak_nS = float(g_leak_nS) + g_ampa_zero
+        e_0 = (
+            float(g_leak_nS) * float(e_leak_mV)
+            + g_ampa_zero * float(e_excitatory_mV)
+        ) / effective_leak_nS
+        voltage_separator_mV = -45 # mV
         roots = find_fixed_points(
             g_n,
-            g_l=float(g_leak_nS),
-            e_l=float(e_leak_mV),
+            g_l=effective_leak_nS,
+            e_l=e_0,
             e_e=float(e_excitatory_mV),
             a=magnesium_coefficient,
             b=0.08,
@@ -1206,7 +1361,7 @@ def compute_per_unit_s0_and_fixed_points(
             if fixed_point_current_slope(
                 voltage,
                 g_n,
-                g_l=float(g_leak_nS),
+                g_l=effective_leak_nS,
                 e_e=float(e_excitatory_mV),
                 a=magnesium_coefficient,
                 b=0.08,
@@ -1232,14 +1387,14 @@ def compute_per_unit_s0_and_fixed_points(
 
 def save_voltage_fixed_point_distribution_data(
     result,
-    fixed_point_result,
+    s0,
     output_dir,
     *,
     metadata,
     voltage_sample_size=500_000,
     random_seed=0,
 ):
-    """Save tidy CSV inputs needed to reproduce voltage/fixed-point plots."""
+    """Save simulation observables needed to recompute and plot fixed points."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1250,7 +1405,7 @@ def save_voltage_fixed_point_distribution_data(
         for name, value in metadata.items():
             writer.writerow((name, "" if value is None else value))
 
-    s0 = np.asarray(fixed_point_result["s0"], dtype=float)
+    s0 = np.asarray(s0, dtype=float)
     g_ampa_0 = np.mean(np.asarray(result["g_ampa_nS"], dtype=float), axis=1)
     voltage_mean = np.asarray(
         result.get(
@@ -1259,15 +1414,12 @@ def save_voltage_fixed_point_distribution_data(
         ),
         dtype=float,
     )
-    per_unit_path = output_dir / "per_unit_steady_state_and_fixed_points.csv"
+    per_unit_path = output_dir / "per_unit_post_burn_in_means.csv"
     fieldnames = (
         "unit_index",
         "s0_empirical",
         "g_ampa_0_nS_empirical",
         "voltage_mean_mV",
-        "open_g_nmda_nS",
-        "lower_fixed_point_mV",
-        "upper_fixed_point_mV",
     )
     with per_unit_path.open("w", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=fieldnames)
@@ -1279,9 +1431,6 @@ def save_voltage_fixed_point_distribution_data(
                     "s0_empirical": s0[unit_index],
                     "g_ampa_0_nS_empirical": g_ampa_0[unit_index],
                     "voltage_mean_mV": voltage_mean[unit_index],
-                    "open_g_nmda_nS": fixed_point_result["open_g_nmda_nS"][unit_index],
-                    "lower_fixed_point_mV": fixed_point_result["lower_fixed_point_mV"][unit_index],
-                    "upper_fixed_point_mV": fixed_point_result["upper_fixed_point_mV"][unit_index],
                 }
             )
 
@@ -1304,29 +1453,29 @@ def save_voltage_fixed_point_distribution_data(
 
 
 def load_voltage_fixed_point_distribution_data(output_dir):
-    """Load the CSV export into the structures accepted by the plotter."""
+    """Load saved simulation observables; fixed points are intentionally absent."""
     output_dir = Path(output_dir)
-    per_unit_path = output_dir / "per_unit_steady_state_and_fixed_points.csv"
+    per_unit_path = output_dir / "per_unit_post_burn_in_means.csv"
+    if not per_unit_path.exists():
+        # Read exports made before fixed points were removed from persisted data.
+        per_unit_path = output_dir / "per_unit_steady_state_and_fixed_points.csv"
     voltage_sample_path = output_dir / "voltage_histogram_sample.csv"
+    metadata_path = output_dir / "metadata.csv"
 
     with per_unit_path.open(newline="") as stream:
         rows = list(csv.DictReader(stream))
 
-    def optional_float(value):
-        return None if value == "" else float(value)
-
-    fixed_point_result = {
+    per_unit_result = {
         "s0": np.asarray([float(row["s0_empirical"]) for row in rows]),
-        "open_g_nmda_nS": np.asarray(
-            [float(row["open_g_nmda_nS"]) for row in rows]
+        "g_ampa_0_nS": np.asarray(
+            [float(row["g_ampa_0_nS_empirical"]) for row in rows]
         ),
-        "lower_fixed_point_mV": [
-            optional_float(row["lower_fixed_point_mV"]) for row in rows
-        ],
-        "upper_fixed_point_mV": [
-            optional_float(row["upper_fixed_point_mV"]) for row in rows
-        ],
+        "voltage_mean_mV": np.asarray(
+            [float(row["voltage_mean_mV"]) for row in rows]
+        ),
     }
+    with metadata_path.open(newline="") as stream:
+        metadata = {row["name"]: row["value"] for row in csv.DictReader(stream)}
     voltage_rows = np.loadtxt(
         voltage_sample_path,
         delimiter=",",
@@ -1335,7 +1484,7 @@ def load_voltage_fixed_point_distribution_data(output_dir):
         ndmin=2,
     )
     voltage_mV = voltage_rows[np.argsort(voltage_rows[:, 0]), 1]
-    return {"voltage_mV": voltage_mV}, fixed_point_result
+    return {"voltage_mV": voltage_mV}, per_unit_result, metadata
 
 
 def plot_voltage_and_fixed_point_distributions(
@@ -1714,7 +1863,7 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
         simulation_time = 100 * ms
         n_models = 4
 
-        result = simulate_ampa_nmda_single_compartment_ensemble(
+        experiment = AmpaNmdaExperimentConfigFactoryBuilder.fitted_apic20().with_property(
             n_models=n_models,
             simulation_time=simulation_time,
             burn_in=0 * ms,
@@ -1724,18 +1873,19 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
             g_L=20 * nS,
             E_L=-65 * mV,
             E_E=0 * mV,
-            tau_AMPA=2 * ms,
-            w_AMPA=0.05 * nS,
+            tau_ampa=2 * ms,
+            w_ampa=0.05 * nS,
             r_e=5 * Hz,
             n_e=8,
-            tau_NMDA_rise=2 * ms,
-            tau_NMDA_decay=100 * ms,
-            alpha_NMDA=0.5 * kHz,
-            g_NMDA_max=4 * nS,
-            n_NMDA=8,
-            w_NMDA=1.0,
-            Mg=1.0,
-        )
+            tau_nmda_rise=2 * ms,
+            tau_nmda_decay=100 * ms,
+            alpha_nmda=0.5 * kHz,
+            g_nmda_max=4 * nS,
+            n_nmda=8,
+            w_nmda=1.0,
+            magnesium=1.0,
+        ).build()
+        result = simulate_ampa_nmda_single_compartment_ensemble(experiment)
 
         self.assertEqual(result["voltage_mV"].shape, (n_models, 1000))
         self.assertTrue(np.all(np.isfinite(result["voltage_mV"])))
@@ -1773,120 +1923,34 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
 
         # Principal experiment inputs are intentionally plain and local: edit
         # these values, then run this one test from the IDE.
-        n_models = 1_000
-        n_e = 800
-        n_NMDA = 10
-        simulation_time = 1_000 * ms
-        burn_in = 500 * ms
-        dt = 0.1 * ms
-        random_seed = 21
         chosen_model_indices = (0, 1, 2)
 
         # Parameters fitted in iteration 20.  The individual assignments stay
         # here so it is obvious which fitted values drive this experiment.
-        fitted = read_fitted_apic20_parameters_from_csv()
-        C_m = fitted.capacitance_nF * nF
-        g_L = fitted.g_leak_nS * nS
-        E_L = fitted.e_leak_mV * mV
-        E_E = fitted.e_excitatory_mV * mV
-        tau_NMDA_rise = fitted.tau_rise_ms * ms
-        tau_NMDA_decay = fitted.tau_decay_ms * ms
-        alpha_NMDA = fitted.alpha_per_ms / ms
-        g_NMDA_max = fitted.g_nmda_max_nS * nS
-        w_NMDA = fitted.spike_weight
-
-        # These were not fitted in iteration 20 and remain explicit inputs.
-        tau_AMPA = 2 * ms
-        w_AMPA = 0.05 * nS
-        Mg = 1.0
-
-        result = simulate_ampa_nmda_single_compartment_ensemble(
-            n_models=n_models,
-            simulation_time=simulation_time,
-            burn_in=burn_in,
-            dt=dt,
-            random_seed=random_seed,
-            C_m=C_m,
-            g_L=g_L,
-            E_L=E_L,
-            E_E=E_E,
-            tau_AMPA=tau_AMPA,
-            w_AMPA=w_AMPA,
-            r_e=r_e,
-            n_e=n_e,
-            tau_NMDA_rise=tau_NMDA_rise,
-            tau_NMDA_decay=tau_NMDA_decay,
-            alpha_NMDA=alpha_NMDA,
-            g_NMDA_max=g_NMDA_max,
-            n_NMDA=n_NMDA,
-            w_NMDA=w_NMDA,
-            Mg=Mg,
-            magnesium_block_tau=tau_mg
+        fitted_cm = 13.16560131 * pfarad
+        experiment = (
+            AmpaNmdaExperimentConfigFactoryBuilder.fitted_apic20()
+            .with_property(
+                C_m = fitted_cm,
+                n_models=1_000, n_e = 800, n_nmda = 10,
+                simulation_time = 1_000 * ms, burn_in = 500 * ms, dt = 0.01 * ms, random_seed = 21,
+                r_e=r_e, magnesium_block_tau=tau_mg)
+            .build()
         )
+        result = simulate_ampa_nmda_single_compartment_ensemble(experiment)
 
         fixed_point_result = compute_per_unit_s0_and_fixed_points(
-            result,
-            g_nmda_max_nS=float(g_NMDA_max / nS),
-            n_nmda=n_NMDA,
-            g_leak_nS=float(g_L / nS),
-            e_leak_mV=float(E_L / mV),
-            e_excitatory_mV=float(E_E / mV),
-            mg=Mg,
+            result, experiment=experiment
         )
-        theoretical_s0_mean = filtered_nmda_shot_noise_cumulants(
-            float(n_NMDA * r_e / Hz),
-            float(tau_NMDA_rise / ms),
-            float(tau_NMDA_decay / ms),
-            float(alpha_NMDA / kHz),
-            float(w_NMDA),
-        )[0]
-        theoretical_g_ampa_0_nS_mean = exponential_shot_noise_cumulants(
-            float(n_e * r_e / Hz),
-            float(tau_AMPA / ms),
-            float(w_AMPA / nS),
-        )[0]
-        model_name = "dynamic_magnesium" if tau_mg is not None else "instantaneous_magnesium"
+        metadata = experiment.build_metadata(result)
+        model_name = metadata["model_name"]
         distribution_data_paths = save_voltage_fixed_point_distribution_data(
             result,
-            fixed_point_result,
+            fixed_point_result["s0"],
             OUTPUT_DIR
             / "voltage_fixed_point_data"
             / f"{float(r_e / Hz):g}_Hz_{model_name}",
-            metadata={
-                "model_name": model_name,
-                "model_equations": result["model_equations"],
-                "n_models": n_models,
-                "n_e": n_e,
-                "n_nmda": n_NMDA,
-                "simulation_time_ms": float(simulation_time / ms),
-                "burn_in_ms": float(burn_in / ms),
-                "dt_ms": float(dt / ms),
-                "random_seed": random_seed,
-                "input_rate_per_source_hz": float(r_e / Hz),
-                "ampa_total_input_rate_hz": float(n_e * r_e / Hz),
-                "nmda_total_input_rate_hz": float(n_NMDA * r_e / Hz),
-                "capacitance_nF": float(C_m / nF),
-                "g_leak_nS": float(g_L / nS),
-                "e_leak_mV": float(E_L / mV),
-                "e_excitatory_mV": float(E_E / mV),
-                "tau_ampa_ms": float(tau_AMPA / ms),
-                "w_ampa_nS": float(w_AMPA / nS),
-                "tau_nmda_rise_ms": float(tau_NMDA_rise / ms),
-                "tau_nmda_decay_ms": float(tau_NMDA_decay / ms),
-                "alpha_nmda_per_ms": float(alpha_NMDA / kHz),
-                "g_nmda_max_nS": float(g_NMDA_max / nS),
-                "w_nmda": float(w_NMDA),
-                "magnesium": Mg,
-                "magnesium_block_tau_ms": result["magnesium_block_tau_ms"],
-                "theoretical_s0_mean": theoretical_s0_mean,
-                "theoretical_g_ampa_0_nS_mean": theoretical_g_ampa_0_nS_mean,
-                "empirical_ensemble_voltage_mean_mV": result["ensemble_mean_mV"],
-                "empirical_ensemble_voltage_variance_mV2": result["ensemble_variance_mV2"],
-                "voltage_histogram_sample_size": min(result["voltage_mV"].size, 500_000),
-                "voltage_histogram_sample_seed": 0,
-                "histogram_bin_count": 150,
-                "fixed_point_normalization": "joint lower+upper probability mass",
-            },
+            metadata=metadata,
         )
         for data_name, data_path in distribution_data_paths.items():
             print(f"Saved fixed-point analysis {data_name}: {data_path}")
@@ -1906,7 +1970,7 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
         )
         print(
             f"Per-unit s0 fixed points: lower={number_of_lower_points:,}, "
-            f"upper={number_of_upper_points:,}, units={n_models:,}"
+            f"upper={number_of_upper_points:,}, units={experiment.n_models:,}"
         )
 
         debug_output_dir = (
@@ -1944,28 +2008,28 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
         )
         gaussianity_summary = compute_shot_noise_gaussianity_summary(
             result,
-            ampa_input_rate_hz=float(n_e * r_e / Hz),
-            nmda_input_rate_hz=float(n_NMDA * r_e / Hz),
-            ampa_tau_ms=float(tau_AMPA / ms),
-            ampa_weight_nS=float(w_AMPA / nS),
-            nmda_tau_rise_ms=float(tau_NMDA_rise / ms),
-            nmda_tau_decay_ms=float(tau_NMDA_decay / ms),
-            nmda_alpha_per_ms=float(alpha_NMDA / kHz),
-            nmda_weight=float(w_NMDA),
-            nmda_open_conductance_scale_nS=float(g_NMDA_max / nS) / n_NMDA,
+            ampa_input_rate_hz=float(experiment.n_e * experiment.r_e / Hz),
+            nmda_input_rate_hz=float(experiment.n_nmda * r_e / Hz),
+            ampa_tau_ms=float(experiment.tau_ampa / ms),
+            ampa_weight_nS=float(experiment.w_ampa / nS),
+            nmda_tau_rise_ms=float(experiment.tau_nmda_rise / ms),
+            nmda_tau_decay_ms=float(experiment.tau_nmda_decay / ms),
+            nmda_alpha_per_ms=float(experiment.alpha_nmda / kHz),
+            nmda_weight=float(experiment.w_nmda),
+            nmda_open_conductance_scale_nS=float(experiment.g_nmda_max / nS) / experiment.n_nmda,
         )
         figure_title = (
-            f"AMPA–NMDA ensemble: N={n_models:,}, r_e={float(r_e / Hz):g} Hz, "
-            f"N_e={n_e}, N_NMDA={n_NMDA}, T={float(simulation_time / ms):g} ms, "
-            f"burn-in={float(burn_in / ms):g} ms, dt={float(dt / ms):g} ms, seed={random_seed}\n"
-            f"Membrane: C_m={float(C_m / nF):.4g} nF, g_L={float(g_L / nS):.4g} nS, "
-            f"E_L={float(E_L / mV):.4g} mV, E_E={float(E_E / mV):.4g} mV; "
-            f"AMPA: tau={float(tau_AMPA / ms):.4g} ms, w={float(w_AMPA / nS):.4g} nS\n"
-            f"NMDA: tau_r={float(tau_NMDA_rise / ms):.4g} ms, "
-            f"tau_d={float(tau_NMDA_decay / ms):.4g} ms, "
-            f"alpha={float(alpha_NMDA / kHz):.4g} kHz, "
-            f"g_max={float(g_NMDA_max / nS):.4g} nS, w={w_NMDA:g}, "
-            f"Mg={Mg:g}; fits: g_AMPA/g_NMDA/s_NMDA single Gaussian, "
+            f"AMPA–NMDA ensemble: N={experiment.n_models:,}, r_e={float(experiment.r_e / Hz):g} Hz, "
+            f"N_e={experiment.n_e}, N_NMDA={experiment.n_nmda}, T={float(experiment.simulation_time / ms):g} ms, "
+            f"burn-in={float(experiment.burn_in / ms):g} ms, dt={float(experiment.dt / ms):g} ms, seed={experiment.random_seed}\n"
+            f"Membrane: C_m={float(experiment.C_m / nF):.4g} nF, g_L={float(experiment.g_L / nS):.4g} nS, "
+            f"E_L={float(experiment.E_L / mV):.4g} mV, E_E={float(experiment.E_E / mV):.4g} mV; "
+            f"AMPA: tau={float(experiment.tau_ampa / ms):.4g} ms, w={float(experiment.w_ampa / nS):.4g} nS\n"
+            f"NMDA: tau_r={float(experiment.tau_nmda_rise / ms):.4g} ms, "
+            f"tau_d={float(experiment.tau_nmda_decay / ms):.4g} ms, "
+            f"alpha={float(experiment.alpha_nmda / kHz):.4g} kHz, "
+            f"g_max={float(experiment.g_nmda_max / nS):.4g} nS, w={experiment.w_nmda:g}, "
+            f"Mg={experiment.magnesium:g}; fits: g_AMPA/g_NMDA/s_NMDA single Gaussian, "
             f"V/x_NMDA two-Gaussian"
         )
         plot_path = plot_chosen_ampa_nmda_traces(
@@ -1979,7 +2043,7 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
             gaussianity_summary=gaussianity_summary,
         )
 
-        self.assertEqual(result["voltage_mV"].shape[0], n_models)
+        self.assertEqual(result["voltage_mV"].shape[0], experiment.n_models)
         self.assertTrue(np.all(np.isfinite(result["voltage_mV"])))
         self.assertGreater(result["ensemble_variance_mV2"], 0.0)
         self.assertTrue(plot_path.exists(), str(plot_path))
@@ -1988,7 +2052,7 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
             fixed_point_distribution_path.exists(),
             str(fixed_point_distribution_path),
         )
-        self.assertEqual(fixed_point_result["s0"].shape, (n_models,))
+        self.assertEqual(fixed_point_result["s0"].shape, (experiment.n_models,))
         if show_plot:
             show_plots_non_blocking()
             return None
@@ -2093,8 +2157,14 @@ class UnderstandLambertRootsComingFromSimulations(unittest.TestCase):
             / "voltage_fixed_point_data"
             / "20_Hz_instantaneous_magnesium"
         )
-        result, fixed_point_result = load_voltage_fixed_point_distribution_data(
+        result, per_unit_result, metadata = load_voltage_fixed_point_distribution_data(
             saved_run_dir
+        )
+        experiment = AmpaNmdaExperimentConfig.from_metadata(metadata)
+        fixed_point_result = compute_fixed_points_from_per_unit_s0(
+            per_unit_result["s0"],
+            experiment=experiment,
+            g_ampa_zero_nS=per_unit_result["g_ampa_0_nS"],
         )
         plot_path = plot_voltage_and_fixed_point_distributions(
             result,

@@ -60,6 +60,8 @@ def find_fixed_points(
         g_n, g_l=g_l, e_l=e_l, e_e=e_e, a=a, b=b
     )
 
+    print(e_l)
+
     def generalized_lambert_residual(x):
         return x * np.exp(x) + r * x - z
 
