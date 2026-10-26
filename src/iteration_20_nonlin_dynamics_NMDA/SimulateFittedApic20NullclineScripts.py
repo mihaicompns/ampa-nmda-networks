@@ -97,6 +97,11 @@ TWO_SPIKE_SELECTION_MAX_MS = 89.0
 TWO_SPIKE_T_MAX_MS = INTERACTIVE_T_MAX_MS
 PARALLEL_SCRIPT_N_JOBS = 8
 G_NMDA_MAX_AMPLIFICATIONS = np.arange(1, 10)
+FITTED_APIC20_TAU_DECAY_SWEEP_MS = (50.0, 70.0, 90.0, 110.0)
+FITTED_APIC20_TAU_DECAY_PROTOCOL_NAMES = tuple(
+    f"current_balance_three_spike_tau_d_{tau_decay_ms:g}_ms"
+    for tau_decay_ms in FITTED_APIC20_TAU_DECAY_SWEEP_MS
+)
 FITTED_APIC20_G_NMDA_AMPLIFICATION_PROTOCOL_NAMES = tuple(
     fitted_apic20_g_nmda_amplification_protocol_name(amplification)
     for amplification in G_NMDA_MAX_AMPLIFICATIONS
@@ -128,6 +133,7 @@ FITTED_APIC20_INTERACTIVE_PROTOCOL_NAMES = (
         for gmax in range(1, 11)
     ),
     *FITTED_APIC20_G_NMDA_AMPLIFICATION_PROTOCOL_NAMES,
+    *FITTED_APIC20_TAU_DECAY_PROTOCOL_NAMES,
 )
 
 FIRST_SPIKE_TIME_MS = 50.0
@@ -468,7 +474,7 @@ def simulate_fitted_apic20_trace(t_ms, parameters, spike_times_ms=None, with_s_s
         t_ms=t_ms,
         s=state["s"],
         initial_v_mV=parameters.e_leak_mV,
-        capacitance_nF=parameters.capacitance_nF,
+        capacitance_nF=parameters.capacitance_nF / 2,
         g_leak_nS=parameters.g_leak_nS,
         e_leak_mV=parameters.e_leak_mV,
         e_excitatory_mV=parameters.e_excitatory_mV,
@@ -1807,6 +1813,20 @@ def fitted_apic20_interactive_protocol_specs():
             "t_max_ms": INTERACTIVE_T_MAX_MS,
             "with_s_saturation": True,
             "g_nmda_max_amplification": float(amplification),
+        }
+    for tau_decay_ms, protocol_name in zip(
+            FITTED_APIC20_TAU_DECAY_SWEEP_MS,
+            FITTED_APIC20_TAU_DECAY_PROTOCOL_NAMES):
+        specs[protocol_name] = {
+            "label": (
+                "current-balance nullcline, 3 spikes, "
+                f"tau_d={tau_decay_ms:g} ms"
+            ),
+            "spike_times_ms": fitted_apic20_spike_times_ms(),
+            "t_min_ms": INTERACTIVE_T_MIN_MS,
+            "t_max_ms": INTERACTIVE_T_MAX_MS,
+            "with_s_saturation": False,
+            "tau_decay_ms": float(tau_decay_ms),
         }
     return {name: specs[name] for name in FITTED_APIC20_INTERACTIVE_PROTOCOL_NAMES}
 

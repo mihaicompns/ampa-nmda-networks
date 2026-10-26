@@ -18,8 +18,10 @@ from brian2 import (
     Clock,
     Network,
     NeuronGroup,
+    PoissonGroup,
     PoissonInput,
     StateMonitor,
+    Synapses,
     kHz,
     ms,
     mV,
@@ -289,7 +291,9 @@ saveAMPAFile = DebugHistogramSaveConfiguration(
 AMPA_NMDA_SINGLE_COMPARTMENT_MODEL = """
 dV/dt = (-I_leak - I_AMPA - I_NMDA) / C_m : volt
 
-dg_e/dt = -g_e / tau_AMPA : siemens
+dg_e_ampa_only/dt = -g_e_ampa_only / tau_AMPA : siemens
+dg_e_shared/dt = -g_e_shared / tau_AMPA : siemens
+g_e = g_e_ampa_only + g_e_shared : siemens
 dx_NMDA/dt = -x_NMDA / tau_NMDA_rise : 1
 ds_NMDA/dt = -s_NMDA / tau_NMDA_decay
              + alpha_NMDA * x_NMDA : 1
@@ -308,7 +312,9 @@ I_NMDA = g_NMDA * (V - E_E) : amp
 AMPA_NMDA_DYNAMIC_MAGNESIUM_MODEL = """
 dV/dt = (-I_leak - I_AMPA - I_NMDA) / C_m : volt
 
-dg_e/dt = -g_e / tau_AMPA : siemens
+dg_e_ampa_only/dt = -g_e_ampa_only / tau_AMPA : siemens
+dg_e_shared/dt = -g_e_shared / tau_AMPA : siemens
+g_e = g_e_ampa_only + g_e_shared : siemens
 dx_NMDA/dt = -x_NMDA / tau_NMDA_rise : 1
 ds_NMDA/dt = -s_NMDA / tau_NMDA_decay
              + alpha_NMDA * x_NMDA : 1
@@ -327,11 +333,13 @@ I_NMDA = g_NMDA * (V - E_E) : amp
 def simulate_ampa_nmda_single_compartment_ensemble(experiment):
     """Simulate independent copies and return voltage samples and statistics.
 
-    ``n_e * r_e`` and ``n_NMDA * r_e`` are superposed Poisson rates for each
-    compartment.  Brian2's ``PoissonInput`` gives every compartment an
-    independent realization, so all 1,000 copies can be integrated together.
+    Each compartment receives ``n_e - n_NMDA`` AMPA-only sources and
+    ``n_NMDA`` shared sources. Every shared event increments both AMPA
+    conductance and NMDA ``x``. Compartments have independent realizations.
     """
     n_models, n_e, n_NMDA = experiment.n_models, experiment.n_e, experiment.n_nmda
+    if not 0 < n_NMDA < n_e:
+        raise ValueError("n_nmda must satisfy 0 < n_nmda < n_e")
     simulation_time, burn_in, dt = experiment.simulation_time, experiment.burn_in, experiment.dt
     random_seed, r_e = experiment.random_seed, experiment.r_e
     C_m, g_L, E_L, E_E = experiment.C_m, experiment.g_L, experiment.E_L, experiment.E_E
@@ -373,7 +381,8 @@ def simulate_ampa_nmda_single_compartment_ensemble(experiment):
         name="single_compartments",
     )
     compartments.V = E_L
-    compartments.g_e = 0 * nS
+    compartments.g_e_ampa_only = 0 * nS
+    compartments.g_e_shared = 0 * nS
     compartments.x_NMDA = 0
     compartments.s_NMDA = 0
     if dynamic_magnesium_block:
@@ -382,23 +391,53 @@ def simulate_ampa_nmda_single_compartment_ensemble(experiment):
         )
         compartments.sigma_Mg = resting_sigma_mg
 
-    ampa_input = PoissonInput(
-        compartments, "g_e", N=n_e, rate=r_e, weight=w_AMPA
+    ampa_only_input = PoissonInput(
+        compartments,
+        "g_e_ampa_only",
+        N=n_e - n_NMDA,
+        rate=r_e,
+        weight=w_AMPA,
     )
-    nmda_input = PoissonInput(
-        compartments, "x_NMDA", N=n_NMDA, rate=r_e, weight=w_NMDA
+    shared_sources = PoissonGroup(
+        n_models * n_NMDA,
+        rates=r_e,
+        clock=clock,
+        name="shared_ampa_nmda_sources",
     )
+    shared_synapses = Synapses(
+        shared_sources,
+        compartments,
+        on_pre="""
+        g_e_shared_post += w_AMPA
+        x_NMDA_post += w_NMDA
+        """,
+        namespace={"w_AMPA": w_AMPA, "w_NMDA": w_NMDA},
+        clock=clock,
+        name="shared_ampa_nmda_synapses",
+    )
+    shared_synapses.connect(j="i // n_NMDA", namespace={"n_NMDA": n_NMDA})
     state = StateMonitor(
         compartments,
-        ["V", "g_e", "g_NMDA", "s_NMDA", "x_NMDA", "sigma_Mg", "sigma_Mg_inf"],
+        [
+            "V", "g_e", "g_e_ampa_only", "g_e_shared", "g_NMDA",
+            "s_NMDA", "x_NMDA", "sigma_Mg", "sigma_Mg_inf",
+        ],
         record=True,
         clock=clock,
     )
-    Network(compartments, ampa_input, nmda_input, state).run(simulation_time)
+    Network(
+        compartments,
+        ampa_only_input,
+        shared_sources,
+        shared_synapses,
+        state,
+    ).run(simulation_time)
 
     sample_mask = state.t >= burn_in
     voltage_mV = np.asarray(state.V[:, sample_mask] / mV)
     g_ampa_nS = np.asarray(state.g_e[:, sample_mask] / nS)
+    g_ampa_only_nS = np.asarray(state.g_e_ampa_only[:, sample_mask] / nS)
+    g_ampa_shared_nS = np.asarray(state.g_e_shared[:, sample_mask] / nS)
     effective_g_nmda_nS = np.asarray(state.g_NMDA[:, sample_mask] / nS)
     s_nmda = np.asarray(state.s_NMDA[:, sample_mask])
     x_nmda = np.asarray(state.x_NMDA[:, sample_mask])
@@ -419,6 +458,8 @@ def simulate_ampa_nmda_single_compartment_ensemble(experiment):
         "time_ms": np.asarray(state.t[sample_mask] / ms),
         "voltage_mV": voltage_mV,
         "g_ampa_nS": g_ampa_nS,
+        "g_ampa_only_nS": g_ampa_only_nS,
+        "g_ampa_shared_nS": g_ampa_shared_nS,
         "effective_g_nmda_nS": effective_g_nmda_nS,
         "s_nmda": s_nmda,
         "x_nmda": x_nmda,
