@@ -3,7 +3,7 @@ import csv
 import math
 import sys
 import unittest
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -57,10 +57,17 @@ from iteration_21_nmda_spikes_under_ei_balance.GeneralizedLambert import (  # no
     find_fixed_points,
     fixed_point_current_slope,
 )
+from iteration_21_nmda_spikes_under_ei_balance.CompartmentDistributionPlots import (  # noqa: E402
+    plot_compartment_s_voltage_fixed_point_distributions,
+)
 
 ITERATION_16_SOLUTIONS_PATH = SRC_DIR / "iteration_16" / "solutions" / "solutions.txt"
 OUTPUT_DIR = Path(__file__).resolve().parent / "plot_output"
 DEBUG_DISTRIBUTION_DIR = Path(__file__).resolve().parent / "debug_distributions"
+
+# Edit both values to control the rows in the always-generated compartment plot.
+COMPARTMENT_DISTRIBUTION_INDICES = (0, 1, 2)
+NUMBER_OF_COMPARTMENT_DISTRIBUTIONS = 3
 
 # Keep the stored names identical to the simulation result keys.
 DEBUG_DISTRIBUTION_VARIABLES = {
@@ -153,6 +160,8 @@ class AmpaNmdaExperimentConfig:
     g_nmda_max: object
     w_nmda: float
     magnesium: float
+    initial_voltage_min: object = field(default_factory=lambda: -80 * mV)
+    initial_voltage_max: object = field(default_factory=lambda: 0 * mV)
     magnesium_block_tau: object = None
 
     def with_property(self, **changes):
@@ -176,6 +185,8 @@ class AmpaNmdaExperimentConfig:
             alpha_nmda=fitted.alpha_per_ms / ms,
             g_nmda_max=fitted.g_nmda_max_nS * nS,
             w_nmda=fitted.spike_weight, magnesium=1.0,
+            initial_voltage_min=-80 * mV,
+            initial_voltage_max=0 * mV,
             magnesium_block_tau=magnesium_block_tau,
         )
 
@@ -198,6 +209,12 @@ class AmpaNmdaExperimentConfig:
             alpha_nmda=value("alpha_nmda_per_ms") / ms,
             g_nmda_max=value("g_nmda_max_nS") * nS,
             w_nmda=value("w_nmda"), magnesium=value("magnesium"),
+            initial_voltage_min=float(
+                metadata.get("initial_voltage_min_mV", -80.0)
+            ) * mV,
+            initial_voltage_max=float(
+                metadata.get("initial_voltage_max_mV", 0.0)
+            ) * mV,
             magnesium_block_tau=(float(tau_sigma) * ms if tau_sigma else None),
         )
 
@@ -217,6 +234,18 @@ class AmpaNmdaExperimentConfig:
             "simulation_time_ms": float(self.simulation_time / ms),
             "burn_in_ms": float(self.burn_in / ms), "dt_ms": float(self.dt / ms),
             "random_seed": self.random_seed,
+            "initial_voltage_distribution": "uniform",
+            "initial_voltage_min_mV": float(self.initial_voltage_min / mV),
+            "initial_voltage_max_mV": float(self.initial_voltage_max / mV),
+            "realized_initial_voltage_min_mV": float(
+                np.min(result["initial_voltage_mV"])
+            ),
+            "realized_initial_voltage_max_mV": float(
+                np.max(result["initial_voltage_mV"])
+            ),
+            "realized_initial_voltage_mean_mV": float(
+                np.mean(result["initial_voltage_mV"])
+            ),
             "input_rate_per_source_hz": float(self.r_e / Hz),
             "ampa_total_input_rate_hz": float(self.n_e * self.r_e / Hz),
             "nmda_total_input_rate_hz": float(self.n_nmda * self.r_e / Hz),
@@ -348,6 +377,10 @@ def simulate_ampa_nmda_single_compartment_ensemble(experiment):
     alpha_NMDA, g_NMDA_max = experiment.alpha_nmda, experiment.g_nmda_max
     w_NMDA, Mg = experiment.w_nmda, experiment.magnesium
     magnesium_block_tau = experiment.magnesium_block_tau
+    initial_voltage_min_mV = float(experiment.initial_voltage_min / mV)
+    initial_voltage_max_mV = float(experiment.initial_voltage_max / mV)
+    if initial_voltage_min_mV > initial_voltage_max_mV:
+        raise ValueError("initial_voltage_min must not exceed initial_voltage_max")
     start_scope()
     seed(random_seed)
     clock = Clock(dt=dt)
@@ -380,14 +413,19 @@ def simulate_ampa_nmda_single_compartment_ensemble(experiment):
         clock=clock,
         name="single_compartments",
     )
-    compartments.V = E_L
+    initial_voltage_mV = np.random.default_rng(random_seed).uniform(
+        initial_voltage_min_mV,
+        initial_voltage_max_mV,
+        size=n_models,
+    )
+    compartments.V = initial_voltage_mV * mV
     compartments.g_e_ampa_only = 0 * nS
     compartments.g_e_shared = 0 * nS
     compartments.x_NMDA = 0
     compartments.s_NMDA = 0
     if dynamic_magnesium_block:
         resting_sigma_mg = 1.0 / (
-            1.0 + np.exp(-0.08 * float(E_L / mV)) * float(Mg) / 3.57
+            1.0 + np.exp(-0.08 * initial_voltage_mV) * float(Mg) / 3.57
         )
         compartments.sigma_Mg = resting_sigma_mg
 
@@ -455,6 +493,7 @@ def simulate_ampa_nmda_single_compartment_ensemble(experiment):
         "magnesium_block_tau_ms": (
             float(magnesium_block_tau / ms) if dynamic_magnesium_block else None
         ),
+        "initial_voltage_mV": initial_voltage_mV,
         "time_ms": np.asarray(state.t[sample_mask] / ms),
         "voltage_mV": voltage_mV,
         "g_ampa_nS": g_ampa_nS,
@@ -1561,7 +1600,18 @@ def plot_voltage_and_fixed_point_distributions(
         )
         return bin_edges, weights
 
-    figure, axis = plt.subplots(figsize=(11, 7))
+    s0 = fixed_point_result.get("s0")
+    if s0 is None:
+        figure, axis = plt.subplots(figsize=(11, 7))
+        s0_axis = None
+    else:
+        s0 = np.asarray(s0, dtype=float)
+        figure, (axis, s0_axis) = plt.subplots(
+            2,
+            1,
+            figsize=(11, 10),
+            gridspec_kw={"height_ratios": [3, 1]},
+        )
     axis.hist(
         sampled_voltage_mV,
         bins=150,
@@ -1605,6 +1655,17 @@ def plot_voltage_and_fixed_point_distributions(
         r"$s_0^{(i)}=\langle s_{NMDA}^{(i)}(t)\rangle$ after burn-in"
     )
     axis.legend()
+    if s0_axis is not None:
+        s0_axis.hist(
+            s0,
+            bins=min(50, max(10, int(np.sqrt(s0.size)))),
+            histtype="stepfilled",
+            color="tab:red",
+            alpha=0.65,
+        )
+        s0_axis.set_xlabel(r"per-unit mean $s_0^{(i)}=\langle s_{NMDA}^{(i)}\rangle$")
+        s0_axis.set_ylabel("number of units")
+        s0_axis.set_title(f"Distribution of per-unit mean s_NMDA (n={s0.size:,})")
     figure.tight_layout()
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1965,6 +2026,9 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
         # Principal experiment inputs are intentionally plain and local: edit
         # these values, then run this one test from the IDE.
         chosen_model_indices = (0, 1, 2)
+        distribution_compartment_indices = COMPARTMENT_DISTRIBUTION_INDICES[
+            :NUMBER_OF_COMPARTMENT_DISTRIBUTIONS
+        ]
 
         # Parameters fitted in iteration 20.  The individual assignments stay
         # here so it is obvious which fitted values drive this experiment.
@@ -2000,6 +2064,31 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
             fixed_point_result,
             OUTPUT_DIR
             / f"voltage_vs_fixed_point_distributions_{float(r_e / Hz):g}_Hz.png",
+        )
+        mean_g_ampa_nS = np.mean(result["g_ampa_nS"], axis=1)
+
+        def fixed_points_from_compartment_s(compartment_index, s_samples):
+            return compute_fixed_points_from_per_unit_s0(
+                s_samples,
+                experiment=experiment,
+                g_ampa_zero_nS=mean_g_ampa_nS[compartment_index],
+            )
+
+        compartment_distribution_path = (
+            plot_compartment_s_voltage_fixed_point_distributions(
+                result,
+                distribution_compartment_indices,
+                fixed_points_from_compartment_s,
+                OUTPUT_DIR
+                / f"compartment_s_v_fixed_points_{float(r_e / Hz):g}_Hz.png",
+                show_plots=show_plot,
+                figure_title=(
+                    "Initial V: uniform["
+                    f"{float(experiment.initial_voltage_min / mV):g}, "
+                    f"{float(experiment.initial_voltage_max / mV):g}] mV; "
+                    f"seed={experiment.random_seed}"
+                ),
+            )
         )
         number_of_lower_points = sum(
             value is not None
@@ -2063,6 +2152,11 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
             f"AMPA–NMDA ensemble: N={experiment.n_models:,}, r_e={float(experiment.r_e / Hz):g} Hz, "
             f"N_e={experiment.n_e}, N_NMDA={experiment.n_nmda}, T={float(experiment.simulation_time / ms):g} ms, "
             f"burn-in={float(experiment.burn_in / ms):g} ms, dt={float(experiment.dt / ms):g} ms, seed={experiment.random_seed}\n"
+            f"Initial V: uniform[{float(experiment.initial_voltage_min / mV):g}, "
+            f"{float(experiment.initial_voltage_max / mV):g}] mV; "
+            f"realized min/mean/max={np.min(result['initial_voltage_mV']):.4g}/"
+            f"{np.mean(result['initial_voltage_mV']):.4g}/"
+            f"{np.max(result['initial_voltage_mV']):.4g} mV\n"
             f"Membrane: C_m={float(experiment.C_m / nF):.4g} nF, g_L={float(experiment.g_L / nS):.4g} nS, "
             f"E_L={float(experiment.E_L / mV):.4g} mV, E_E={float(experiment.E_E / mV):.4g} mV; "
             f"AMPA: tau={float(experiment.tau_ampa / ms):.4g} ms, w={float(experiment.w_ampa / nS):.4g} nS\n"
@@ -2094,6 +2188,10 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
             str(fixed_point_distribution_path),
         )
         self.assertEqual(fixed_point_result["s0"].shape, (experiment.n_models,))
+        self.assertTrue(
+            compartment_distribution_path.exists(),
+            str(compartment_distribution_path),
+        )
         if show_plot:
             show_plots_non_blocking()
             return None
@@ -2103,6 +2201,7 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
             "ensemble_mean_mV": result["ensemble_mean_mV"],
             "ensemble_variance_mV2": result["ensemble_variance_mV2"],
             "plot_path": str(plot_path),
+            "compartment_distribution_path": str(compartment_distribution_path),
         }
 
     def _fit_one_saved_debug_distribution(
@@ -2173,11 +2272,27 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
             figure.tight_layout()
             plt.show(block=False)
             plt.pause(0.1)
+            compartment_plot_image = plt.imread(
+                result["compartment_distribution_path"]
+            )
+            compartment_figure, compartment_axis = plt.subplots(figsize=(15, 14))
+            compartment_axis.imshow(compartment_plot_image)
+            compartment_axis.axis("off")
+            compartment_axis.set_title(
+                f"Per-compartment distributions: r_e={result['rate_hz']:g} Hz"
+            )
+            compartment_figure.tight_layout()
+            plt.show(block=False)
+            plt.pause(0.1)
 
         results.sort(key=lambda result: result["rate_hz"])
         self.assertEqual([result["rate_hz"] for result in results], rates_hz.tolist())
         for result in results:
             self.assertTrue(Path(result["plot_path"]).exists(), result["plot_path"])
+            self.assertTrue(
+                Path(result["compartment_distribution_path"]).exists(),
+                result["compartment_distribution_path"],
+            )
 
 
 def run_ampa_nmda_rate_in_worker(rate_hz):

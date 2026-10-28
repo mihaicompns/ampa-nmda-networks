@@ -564,6 +564,7 @@ class UnderstandDistributionOfMembraneVoltageUnderNMDA(unittest.TestCase):
             .with_property(
                 n_models=1_000,
                 simulation_time=2 * second,
+                r_e = 17 * Hz
             )
             .build()
         )
