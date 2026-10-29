@@ -1,6 +1,5 @@
 import json
 import csv
-import math
 import sys
 import unittest
 from dataclasses import dataclass, field, replace
@@ -59,6 +58,12 @@ from iteration_21_nmda_spikes_under_ei_balance.GeneralizedLambert import (  # no
 )
 from iteration_21_nmda_spikes_under_ei_balance.CompartmentDistributionPlots import (  # noqa: E402
     plot_compartment_s_voltage_fixed_point_distributions,
+)
+from iteration_21_nmda_spikes_under_ei_balance.ShotNoiseCumulants import (  # noqa: E402
+    compute_shot_noise_gaussianity_summary,
+    exponential_shot_noise_cumulants,
+    filtered_nmda_shot_noise_cumulants,
+    format_shot_noise_gaussianity_rows,
 )
 
 ITERATION_16_SOLUTIONS_PATH = SRC_DIR / "iteration_16" / "solutions" / "solutions.txt"
@@ -1060,121 +1065,6 @@ def fit_single_exponential(values, random_seed=21, max_samples=20_000):
     }
 
 
-def exponential_shot_noise_cumulants(rate_hz, tau_ms, amplitude):
-    """Return stationary cumulants 1..4 for exponential Poisson shot noise."""
-    rate_tau = float(rate_hz) * float(tau_ms) / 1000.0
-    return np.asarray(
-        [rate_tau * float(amplitude) ** order / order for order in range(1, 5)]
-    )
-
-
-def filtered_nmda_shot_noise_cumulants(
-    rate_hz, tau_rise_ms, tau_decay_ms, alpha_per_ms, weight
-):
-    """Cumulants 1..4 of s for Poisson-driven linear x-to-s NMDA kinetics."""
-    tau_rise = float(tau_rise_ms) / 1000.0
-    tau_decay = float(tau_decay_ms) / 1000.0
-    alpha = float(alpha_per_ms) * 1000.0
-    amplitude_scale = (
-        alpha * float(weight) * tau_rise * tau_decay / (tau_decay - tau_rise)
-    )
-    cumulants = []
-    for order in range(1, 5):
-        kernel_power_integral = amplitude_scale**order * sum(
-            (-1) ** index
-            * math.comb(order, index)
-            / ((order - index) / tau_decay + index / tau_rise)
-            for index in range(order + 1)
-        )
-        cumulants.append(float(rate_hz) * kernel_power_integral)
-    return np.asarray(cumulants)
-
-
-def _estimated_cumulants(values, max_samples=500_000, random_seed=0):
-    values = np.asarray(values, dtype=float).ravel()
-    if values.size > max_samples:
-        indices = np.random.default_rng(random_seed).choice(
-            values.size, size=max_samples, replace=False
-        )
-        values = values[indices]
-    centered = values - np.mean(values)
-    variance = float(np.mean(centered**2))
-    third = float(np.mean(centered**3))
-    fourth = float(np.mean(centered**4) - 3.0 * variance**2)
-    return np.asarray([float(np.mean(values)), variance, third, fourth])
-
-
-def _with_standardized_higher_cumulants(theoretical, empirical):
-    return {
-        "theoretical_cumulants": theoretical,
-        "empirical_cumulants": empirical,
-        "theoretical_skewness": float(theoretical[2] / theoretical[1] ** 1.5),
-        "empirical_skewness": float(empirical[2] / empirical[1] ** 1.5),
-        "theoretical_excess_kurtosis": float(theoretical[3] / theoretical[1] ** 2),
-        "empirical_excess_kurtosis": float(empirical[3] / empirical[1] ** 2),
-    }
-
-
-def compute_shot_noise_gaussianity_summary(
-    result,
-    *,
-    ampa_input_rate_hz,
-    nmda_input_rate_hz,
-    ampa_tau_ms,
-    ampa_weight_nS,
-    nmda_tau_rise_ms,
-    nmda_tau_decay_ms,
-    nmda_alpha_per_ms,
-    nmda_weight,
-    nmda_open_conductance_scale_nS,
-):
-    """Compare theoretical and sampled higher cumulants with Gaussian zeros."""
-    x_theory = exponential_shot_noise_cumulants(
-        nmda_input_rate_hz, nmda_tau_rise_ms, nmda_weight
-    )
-    s_theory = filtered_nmda_shot_noise_cumulants(
-        nmda_input_rate_hz,
-        nmda_tau_rise_ms,
-        nmda_tau_decay_ms,
-        nmda_alpha_per_ms,
-        nmda_weight,
-    )
-    g_nmda_theory = s_theory * np.asarray(
-        [nmda_open_conductance_scale_nS**order for order in range(1, 5)]
-    )
-    g_ampa_theory = exponential_shot_noise_cumulants(
-        ampa_input_rate_hz, ampa_tau_ms, ampa_weight_nS
-    )
-    pairs = {
-        "x": (x_theory, result["x_nmda"]),
-        "s": (s_theory, result["s_nmda"]),
-        # Theory is for open g_NMDA; data include the voltage-dependent Mg block.
-        "g_NMDA": (g_nmda_theory, result["effective_g_nmda_nS"]),
-        "g_AMPA": (g_ampa_theory, result["g_ampa_nS"]),
-    }
-    return {
-        name: _with_standardized_higher_cumulants(
-            theoretical, _estimated_cumulants(values)
-        )
-        for name, (theoretical, values) in pairs.items()
-    }
-
-
-def format_shot_noise_gaussianity_rows(summary):
-    """Return table-like text aligned with V, g_AMPA, g_NMDA, s, and x rows."""
-    rows = ["not evaluated for V"]
-    for name in ("g_AMPA", "g_NMDA", "s", "x"):
-        values = summary[name]
-        theory_label = "open theory" if name == "g_NMDA" else "theory"
-        rows.append(
-            f"γ₁  {theory_label:<11} {values['theoretical_skewness']:>8.3g}\n"
-            f"    data        {values['empirical_skewness']:>8.3g}\n"
-            f"γ₂  {theory_label:<11} {values['theoretical_excess_kurtosis']:>8.3g}\n"
-            f"    data        {values['empirical_excess_kurtosis']:>8.3g}"
-        )
-    return rows
-
-
 def plot_chosen_ampa_nmda_traces(
     result,
     chosen_model_indices=(0, 1, 2),
@@ -1318,8 +1208,7 @@ def plot_chosen_ampa_nmda_traces(
     voltage_histogram_ax.set_title("distribution", fontsize=10)
     fit_axes[0].set_title("distribution fit", fontsize=10)
     gaussianity_axes[0].set_title(
-        "model equation and higher cumulants\n"
-        "(Gaussian reference: γ₁ = γ₂ = 0)",
+        "model equation and standardized cumulants",
         fontsize=10,
     )
     gaussianity_rows = (
@@ -2146,7 +2035,6 @@ class SimulateNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
             nmda_tau_decay_ms=float(experiment.tau_nmda_decay / ms),
             nmda_alpha_per_ms=float(experiment.alpha_nmda / kHz),
             nmda_weight=float(experiment.w_nmda),
-            nmda_open_conductance_scale_nS=float(experiment.g_nmda_max / nS) / experiment.n_nmda,
         )
         figure_title = (
             f"AMPA–NMDA ensemble: N={experiment.n_models:,}, r_e={float(experiment.r_e / Hz):g} Hz, "

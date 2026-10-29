@@ -12,8 +12,10 @@ import csv
 import unittest
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import matplotlib.pyplot as plt
+from matplotlib.animation import FFMpegWriter, FuncAnimation, PillowWriter
 import numpy as np
 from joblib import Parallel, delayed
 from scipy.special import logsumexp
@@ -23,6 +25,10 @@ from iteration_21_nmda_spikes_under_ei_balance.GeneralizedLambert import (
 )
 from iteration_21_nmda_spikes_under_ei_balance.CompartmentDistributionPlots import (
     plot_compartment_s_voltage_fixed_point_distributions,
+)
+from iteration_21_nmda_spikes_under_ei_balance.ShotNoiseCumulants import (
+    compute_shot_noise_gaussianity_summary,
+    format_shot_noise_gaussianity_rows,
 )
 from brian2 import (
     Clock,
@@ -53,6 +59,67 @@ NUMBER_OF_COMPARTMENT_DISTRIBUTIONS = 3
 # fixed-point histogram.  This is independent of the 1,000 per-neuron means
 # retained for the lower panel.
 FIXED_POINT_STATE_SAMPLE_COUNT = 50_000
+
+# A low FPS makes the moving-nullcline GIFs easier to inspect than the
+# standard fitted-APIC20 protocol animation.
+SUMMED_NMDA_ANIMATION_FPS = 10
+SUMMED_NMDA_ANIMATION_FRAME_COUNT = 1600
+
+
+@dataclass(frozen=True)
+class SummedNmdaAnimationRequest:
+    """Select one rate/unit trace and an optional post-burn-in time window."""
+
+    r_e_hz: float
+    unit_index: int
+    t_min_ms: float = None
+    t_max_ms: float = None
+    output_format: str = "gif"
+    frame_count: int = SUMMED_NMDA_ANIMATION_FRAME_COUNT
+    fps: int = SUMMED_NMDA_ANIMATION_FPS
+
+
+def _number_label(value):
+    return f"{float(value):g}".replace("-", "m").replace(".", "p")
+
+
+def _nmda_time_constants_title(tau_rise_ms, tau_decay_ms):
+    """Return consistently rendered simulated NMDA time constants."""
+    return (
+        rf"$\tau_r={float(tau_rise_ms):g}\,\mathrm{{ms}}$, "
+        rf"$\tau_D={float(tau_decay_ms):g}\,\mathrm{{ms}}$"
+    )
+
+
+def _experiment_nmda_time_constants_title(experiment):
+    return _nmda_time_constants_title(
+        experiment.tau_nmda_rise / ms,
+        experiment.tau_nmda_decay / ms,
+    )
+
+
+def summed_nmda_animation_filename(request, random_seed):
+    output_format = str(request.output_format).lower().lstrip(".")
+    if output_format not in {"gif", "mp4"}:
+        raise ValueError("animation output_format must be 'gif' or 'mp4'")
+    if request.t_min_ms is None and request.t_max_ms is None:
+        time_label = "all"
+    else:
+        start = "start" if request.t_min_ms is None else _number_label(request.t_min_ms)
+        stop = "end" if request.t_max_ms is None else _number_label(request.t_max_ms)
+        time_label = f"{start}_to_{stop}"
+    return (
+        f"summed_nmda_re_{_number_label(request.r_e_hz)}_Hz_"
+        f"unit_{request.unit_index}_t_{time_label}_ms_seed_{random_seed}."
+        f"{output_format}"
+    )
+
+
+def summed_nmda_trace_filename(r_e_hz, unit_index, random_seed):
+    return (
+        f"summed_nmda_re_{_number_label(r_e_hz)}_Hz_unit_{unit_index}_"
+        f"seed_{random_seed}_trace.csv"
+    )
 
 
 @dataclass(frozen=True)
@@ -99,7 +166,7 @@ class AmpaNmdaExperimentConfig:
             n_models=1_000,
             n_e=800,
             n_nmda=10,
-            simulation_time=1_000 * ms,
+            simulation_time=2_000 * ms,
             burn_in=500 * ms,
             dt=0.1 * ms,
             random_seed=22,
@@ -244,36 +311,79 @@ def _fit_gaussian_mixture(values, number_of_components, random_seed=21):
     }
 
 
-def _summed_x_shot_noise_summary(result, experiment):
-    """Return theoretical and empirical stationary moments for summed x."""
-    rate_tau = float(experiment.n_nmda * experiment.r_e / Hz) * float(
-        experiment.tau_nmda_rise / (1000 * ms)
+def _summed_shot_noise_summary(result, experiment):
+    """Return common theory/data cumulant summaries for every synaptic state."""
+    return compute_shot_noise_gaussianity_summary(
+        result,
+        ampa_input_rate_hz=float(experiment.n_e * experiment.r_e / Hz),
+        nmda_input_rate_hz=float(experiment.n_nmda * experiment.r_e / Hz),
+        ampa_tau_ms=float(experiment.tau_ampa / ms),
+        ampa_weight_nS=float(experiment.w_ampa / nS),
+        nmda_tau_rise_ms=float(experiment.tau_nmda_rise / ms),
+        nmda_tau_decay_ms=float(experiment.tau_nmda_decay / ms),
+        nmda_alpha_per_ms=float(experiment.alpha_nmda / kHz),
+        nmda_weight=float(experiment.w_nmda),
     )
-    amplitude = float(experiment.w_nmda)
-    cumulants = np.asarray(
-        [rate_tau * amplitude**order / order for order in range(1, 5)]
+
+
+# For dx/dt=-x/tau_r+w*sum_k delta(t-t_k) and
+# ds/dt=-s/tau_D+alpha*x, stationarity gives
+# s_0 = alpha*tau_D*<x> = alpha*w*(N*r_e)*tau_r*tau_D.
+def compute_theoretical_s0(experiment):
+    """Return the stationary mean summed NMDA s state."""
+    summed_rate_per_ms = float(experiment.n_nmda * experiment.r_e / kHz)
+    return float(
+        (experiment.alpha_nmda / kHz)
+        * experiment.w_nmda
+        * summed_rate_per_ms
+        * (experiment.tau_nmda_rise / ms)
+        * (experiment.tau_nmda_decay / ms)
     )
-    values = np.asarray(result["x_nmda"], dtype=float).ravel()
-    centered = values - values.mean()
-    empirical_variance = float(np.mean(centered**2))
-    if empirical_variance > np.finfo(float).eps:
-        empirical_skewness = float(np.mean(centered**3) / empirical_variance**1.5)
-        empirical_excess_kurtosis = float(
-            np.mean(centered**4) / empirical_variance**2 - 3.0
+
+
+def compute_theoretical_ito_correction(experiment, voltage_mV):
+    r"""Return the NMDA multiplicative-noise Itô drift correction [mV/ms].
+
+    With C_x=alpha*w*tau_r and
+    D_s=int_0^infinity Cov[s(t),s(t+tau)]d tau
+       =N*r_e*C_x^2*tau_D^2/2, the correction is
+    D_s*(g_NMDA/(N*C_m))^2*sigma(V)^2*(V-E_E)
+    *[1+B*(V-E_E)*(1-sigma(V))].
+    """
+    voltage_mV = np.asarray(voltage_mV, dtype=float)
+    tau_rise_ms = float(experiment.tau_nmda_rise / ms)
+    tau_decay_ms = float(experiment.tau_nmda_decay / ms)
+    alpha_per_ms = float(experiment.alpha_nmda / kHz)
+    total_rate_per_ms = float(experiment.n_nmda * experiment.r_e / kHz)
+    c_x = alpha_per_ms * float(experiment.w_nmda) * tau_rise_ms
+    d_s_ms = total_rate_per_ms * c_x**2 * tau_decay_ms**2 / 2.0
+    nmda_scale_per_ms = (
+        float(experiment.g_nmda_max / nS)
+        / int(experiment.n_nmda)
+        / float(experiment.C_m / nF)
+        / 1000.0
+    )
+    e_excitatory_mV = float(experiment.E_E / mV)
+    voltage_from_excitation_mV = voltage_mV - e_excitatory_mV
+    magnesium_block = float(experiment.magnesium) / 3.57
+    magnesium_slope_per_mV = 0.08
+    sigma_mg = 1.0 / (
+        1.0
+        + magnesium_block
+        * np.exp(-magnesium_slope_per_mV * voltage_mV)
+    )
+    return (
+        d_s_ms
+        * nmda_scale_per_ms**2
+        * sigma_mg**2
+        * voltage_from_excitation_mV
+        * (
+            1.0
+            + magnesium_slope_per_mV
+            * voltage_from_excitation_mV
+            * (1.0 - sigma_mg)
         )
-    else:
-        empirical_skewness = float("nan")
-        empirical_excess_kurtosis = float("nan")
-    return {
-        "theoretical_mean": float(cumulants[0]),
-        "theoretical_variance": float(cumulants[1]),
-        "theoretical_skewness": float(cumulants[2] / cumulants[1] ** 1.5),
-        "theoretical_excess_kurtosis": float(cumulants[3] / cumulants[1] ** 2),
-        "empirical_mean": float(values.mean()),
-        "empirical_variance": empirical_variance,
-        "empirical_skewness": empirical_skewness,
-        "empirical_excess_kurtosis": empirical_excess_kurtosis,
-    }
+    )
 
 
 def plot_summed_nmda_three_neuron_diagnostics(
@@ -293,7 +403,7 @@ def plot_summed_nmda_three_neuron_diagnostics(
         5,
         4,
         figsize=(20, 14),
-        gridspec_kw={"width_ratios": [4.0, 1.1, 1.5, 2.2]},
+        gridspec_kw={"width_ratios": [4.0, 1.1, 1.5, 3.2]},
     )
     names = ("voltage_mV", "g_ampa_nS", "effective_g_nmda_nS", "s_nmda", "x_nmda")
     labels = (
@@ -333,40 +443,36 @@ def plot_summed_nmda_three_neuron_diagnostics(
             axes[row, 2].plot(
                 fit["mixture_density"], fit["grid"], color=color, linewidth=2
             )
-            fit_name = "Gaussian" if number_of_components == 1 else "2-Gaussian mixture"
-            parameters = "\n".join(
-                f"p={weight:.3g}, μ={mean:.3g}, σ={std:.3g}"
-                for weight, mean, std in zip(
-                    fit["weights"], fit["means"], fit["standard_deviations"]
-                )
-            )
-            axes[row, 3].axis("off")
-            axes[row, 3].text(0.02, 0.5, f"{fit_name}\n{parameters}", va="center")
         axes[row, 2].set_xlabel("fit density")
 
-    shot_noise = _summed_x_shot_noise_summary(result, experiment)
-    x_axis = axes[4, 3]
-    x_axis.axis("off")
-    x_axis.text(
-        0.02,
-        0.5,
-        "Summed Poisson shot noise\n"
-        f"rate = {float(experiment.n_nmda * experiment.r_e / Hz):.4g} Hz\n"
-        f"theory μ={shot_noise['theoretical_mean']:.4g}, var={shot_noise['theoretical_variance']:.4g}\n"
-        f"data   μ={shot_noise['empirical_mean']:.4g}, var={shot_noise['empirical_variance']:.4g}\n"
-        f"theory skew={shot_noise['theoretical_skewness']:.4g}, excess={shot_noise['theoretical_excess_kurtosis']:.4g}\n"
-        f"data   skew={shot_noise['empirical_skewness']:.4g}, excess={shot_noise['empirical_excess_kurtosis']:.4g}",
-        va="center",
-        fontfamily="monospace",
-    )
+    shot_noise = _summed_shot_noise_summary(result, experiment)
+    gaussianity_rows = format_shot_noise_gaussianity_rows(shot_noise)
+    equations = result.get("trace_model_equations", TRACE_MODEL_EQUATIONS)
+    for row, (axis, equation, cumulant_text) in enumerate(
+        zip(axes[:, 3], equations, gaussianity_rows)
+    ):
+        axis.axis("off")
+        axis.text(0.02, 0.72 if row else 0.5, equation, va="center", fontsize=9)
+        if row:
+            axis.text(
+                0.02,
+                0.27,
+                cumulant_text,
+                va="center",
+                fontsize=8,
+                fontfamily="monospace",
+            )
     axes[0, 0].set_title("Three chosen neurons")
     axes[0, 1].set_title("population distribution")
     axes[0, 2].set_title("Gaussian fit")
-    axes[0, 3].set_title("fit / shot-noise description")
+    axes[0, 3].set_title(
+        "model equation and standardized cumulants"
+    )
     axes[-1, 0].set_xlabel("time [ms]")
     figure.suptitle(
         f"Summed AMPA–NMDA input: r_e={float(experiment.r_e / Hz):g} Hz, "
         f"N_e={experiment.n_e}, N_NMDA={experiment.n_nmda}\n"
+        f"{_experiment_nmda_time_constants_title(experiment)}\n"
         f"Initial V: uniform[{float(experiment.initial_voltage_min / mV):g}, "
         f"{float(experiment.initial_voltage_max / mV):g}] mV; "
         f"seed={experiment.random_seed}; realized min/mean/max="
@@ -550,6 +656,493 @@ def simulate_ampa_nmda_single_compartment_ensemble_with_summed_nmda_input(
     return result
 
 
+SUMMED_NMDA_TRACE_ARRAY_COLUMNS = (
+    "time_ms",
+    "voltage_mV",
+    "effective_g_nmda_nS",
+    "s_nmda",
+    "g_ampa_nS",
+)
+SUMMED_NMDA_TRACE_METADATA_COLUMNS = (
+    "r_e_hz",
+    "unit_index",
+    "random_seed",
+    "n_nmda",
+    "g_nmda_max_nS",
+    "g_leak_nS",
+    "e_leak_mV",
+    "e_excitatory_mV",
+    "capacitance_nF",
+    "magnesium",
+    "tau_nmda_rise_ms",
+    "tau_nmda_decay_ms",
+    "alpha_nmda_per_ms",
+    "w_nmda",
+)
+
+
+def save_summed_nmda_unit_trace_csv(result, experiment, unit_index, output_path):
+    """Save one unit's trace plus the constants required for later nullclines."""
+    unit_index = int(unit_index)
+    if not 0 <= unit_index < experiment.n_models:
+        raise IndexError(f"unit_index {unit_index} is outside 0..{experiment.n_models - 1}")
+    metadata = {
+        "r_e_hz": float(experiment.r_e / Hz),
+        "unit_index": unit_index,
+        "random_seed": int(experiment.random_seed),
+        "n_nmda": int(experiment.n_nmda),
+        "g_nmda_max_nS": float(experiment.g_nmda_max / nS),
+        "g_leak_nS": float(experiment.g_L / nS),
+        "e_leak_mV": float(experiment.E_L / mV),
+        "e_excitatory_mV": float(experiment.E_E / mV),
+        "capacitance_nF": float(experiment.C_m / nF),
+        "magnesium": float(experiment.magnesium),
+        "tau_nmda_rise_ms": float(experiment.tau_nmda_rise / ms),
+        "tau_nmda_decay_ms": float(experiment.tau_nmda_decay / ms),
+        "alpha_nmda_per_ms": float(experiment.alpha_nmda / kHz),
+        "w_nmda": float(experiment.w_nmda),
+    }
+    arrays = {
+        "time_ms": np.asarray(result["time_ms"], dtype=float),
+        "voltage_mV": np.asarray(result["voltage_mV"][unit_index], dtype=float),
+        "effective_g_nmda_nS": np.asarray(
+            result["effective_g_nmda_nS"][unit_index], dtype=float
+        ),
+        "s_nmda": np.asarray(result["s_nmda"][unit_index], dtype=float),
+        "g_ampa_nS": np.asarray(result["g_ampa_nS"][unit_index], dtype=float),
+    }
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = (*SUMMED_NMDA_TRACE_METADATA_COLUMNS, *SUMMED_NMDA_TRACE_ARRAY_COLUMNS)
+    with output_path.open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer.writeheader()
+        for sample_index in range(len(arrays["time_ms"])):
+            writer.writerow(
+                metadata
+                | {name: arrays[name][sample_index] for name in SUMMED_NMDA_TRACE_ARRAY_COLUMNS}
+            )
+    return output_path
+
+
+def load_summed_nmda_unit_trace_csv(input_path):
+    """Load a trace CSV written by :func:`save_summed_nmda_unit_trace_csv`."""
+    with Path(input_path).open(newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    if not rows:
+        raise ValueError(f"saved trace CSV is empty: {input_path}")
+    trace = {
+        name: np.asarray([float(row[name]) for row in rows], dtype=float)
+        for name in SUMMED_NMDA_TRACE_ARRAY_COLUMNS
+    }
+    first = rows[0]
+    for name in SUMMED_NMDA_TRACE_METADATA_COLUMNS:
+        converter = int if name in {"unit_index", "random_seed", "n_nmda"} else float
+        if name in first:
+            trace[name] = converter(first[name])
+    if "alpha_nmda_per_ms" not in trace or "w_nmda" not in trace:
+        from iteration_20_nonlin_dynamics_NMDA.SimulateFittedApic20NullclineScripts import (
+            read_fitted_apic20_parameters_from_csv,
+        )
+
+        fitted = read_fitted_apic20_parameters_from_csv()
+        trace.setdefault("alpha_nmda_per_ms", float(fitted.alpha_per_ms))
+        trace.setdefault("w_nmda", float(fitted.spike_weight))
+    return trace
+
+
+def _saved_trace_nullcline(trace, index, voltage_grid_mV):
+    sigma = 1.0 / (
+        1.0
+        + np.exp(-0.08 * voltage_grid_mV) * float(trace["magnesium"]) / 3.57
+    )
+    open_g_nmda_nS = (
+        float(trace["g_nmda_max_nS"])
+        / int(trace["n_nmda"])
+        * float(trace["s_nmda"][index])
+    )
+    total_current_pA = (
+        float(trace["g_leak_nS"])
+        * (voltage_grid_mV - float(trace["e_leak_mV"]))
+        + float(trace["g_ampa_nS"][index])
+        * (voltage_grid_mV - float(trace["e_excitatory_mV"]))
+        + open_g_nmda_nS
+        * sigma
+        * (voltage_grid_mV - float(trace["e_excitatory_mV"]))
+    )
+    return -1e-3 * total_current_pA / float(trace["capacitance_nF"])
+
+
+def plot_summed_nmda_trace_snapshot(saved_trace, snapshot_time_ms, output_path):
+    """Plot one selected saved-trace iteration in the animation's layout."""
+    from iteration_20_nonlin_dynamics_NMDA.SimulateFittedApic20NullclineScripts import (
+        classify_intersection_stability,
+        create_fitted_nullcline_figure,
+        derivative_ylim,
+        estimate_zero_crossings,
+    )
+
+    time_ms = np.asarray(saved_trace["time_ms"], dtype=float)
+    index = int(np.argmin(np.abs(time_ms - float(snapshot_time_ms))))
+    voltage_grid_mV = np.linspace(-90.0, 20.0, 500)
+    nullcline = _saved_trace_nullcline(saved_trace, index, voltage_grid_mV)
+    axes = create_fitted_nullcline_figure()
+    figure = axes["fig"]
+    axes["model_ax"].axis("off")
+    axes["model_ax"].text(
+        0.5,
+        0.5,
+        r"$C_m dV/dt=-I_L-I_{AMPA}-I_{NMDA}$" "\n"
+        r"$g_{NMDA}=g_{NMDA,max}s(t)\sigma_{Mg}(V)$",
+        ha="center",
+        va="center",
+        fontsize=12,
+    )
+    panels = (
+        ("voltage_ax", "voltage_mV", r"$V(t)$", "V [mV]", "tab:blue"),
+        (
+            "g_nmda_ax",
+            "effective_g_nmda_nS",
+            r"$g_{NMDA}(t)$",
+            "g_NMDA [nS]",
+            "tab:green",
+        ),
+        ("s_ax", "s_nmda", r"$s(t)$", "s", "tab:purple"),
+    )
+    for axis_name, value_name, title_text, ylabel, color in panels:
+        values = np.asarray(saved_trace[value_name], dtype=float)
+        axis = axes[axis_name]
+        axis.plot(time_ms, values, color=color, linewidth=1.5)
+        axis.plot([time_ms[index]], [values[index]], "o", color=color)
+        axis.axvline(time_ms[index], color="0.35", linestyle="--", linewidth=1)
+        axis.set(title=title_text, xlabel="t [ms]", ylabel=ylabel)
+    nullcline_axis = axes["nullcline_ax"]
+    nullcline_axis.axhline(0.0, color="black", linewidth=1)
+    nullcline_axis.plot(voltage_grid_mV, nullcline, color="tab:orange", linewidth=2)
+    current_v_mV = float(saved_trace["voltage_mV"][index])
+    current_dvdt = float(np.interp(current_v_mV, voltage_grid_mV, nullcline))
+    nullcline_axis.plot([current_v_mV], [current_dvdt], "o", color="tab:orange")
+    nullcline_axis.axvline(current_v_mV, color="tab:blue", linewidth=1)
+    intersections = estimate_zero_crossings(voltage_grid_mV, nullcline)
+    stable, unstable = classify_intersection_stability(intersections)
+    nullcline_axis.plot(stable, np.zeros_like(stable), "o", color="black")
+    nullcline_axis.plot(
+        unstable,
+        np.zeros_like(unstable),
+        "o",
+        color="black",
+        markerfacecolor="none",
+    )
+    nullcline_axis.set(
+        xlim=(-90, 20),
+        ylim=derivative_ylim(nullcline),
+        title=r"$dV/dt(V; s(t), g_{AMPA}(t))$",
+        xlabel="V [mV]",
+        ylabel="dV/dt [mV/ms]",
+    )
+    figure.suptitle(
+        f"Saved summed-NMDA trace: r_e={saved_trace['r_e_hz']:g} Hz, "
+        f"unit={saved_trace['unit_index']}, seed={saved_trace['random_seed']}\n"
+        f"{_nmda_time_constants_title(saved_trace['tau_nmda_rise_ms'], saved_trace['tau_nmda_decay_ms'])}\n"
+        f"requested t={float(snapshot_time_ms):g} ms, sampled t={time_ms[index]:g} ms, "
+        f"V={current_v_mV:.2f} mV"
+    )
+    figure.subplots_adjust(left=0.06, right=0.98, bottom=0.08, top=0.86)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(figure)
+    return output_path
+
+
+def generate_summed_nmda_moving_nullcline_animation(
+    result,
+    experiment,
+    request,
+    output_path,
+    *,
+    frame_count=None,
+    fps=None,
+    display_unit_index=None,
+):
+    """Animate V, effective g_NMDA, s, and the instantaneous V-nullcline."""
+    from iteration_20_nonlin_dynamics_NMDA.SimulateFittedApic20NullclineScripts import (
+        classify_intersection_stability,
+        create_fitted_nullcline_figure,
+        derivative_ylim,
+        estimate_zero_crossings,
+    )
+
+    unit_index = int(request.unit_index)
+    if display_unit_index is None:
+        display_unit_index = unit_index
+    frame_count = request.frame_count if frame_count is None else frame_count
+    fps = request.fps if fps is None else fps
+    output_format = str(request.output_format).lower().lstrip(".")
+    if output_format not in {"gif", "mp4"}:
+        raise ValueError("animation output_format must be 'gif' or 'mp4'")
+    if int(frame_count) < 1 or int(fps) < 1:
+        raise ValueError("animation frame_count and fps must be at least 1")
+    if not 0 <= unit_index < experiment.n_models:
+        raise IndexError(
+            f"animation unit_index {unit_index} is outside 0..{experiment.n_models - 1}"
+        )
+    time_ms = np.asarray(result["time_ms"], dtype=float)
+    t_min_ms = float(time_ms[0] if request.t_min_ms is None else request.t_min_ms)
+    t_max_ms = float(time_ms[-1] if request.t_max_ms is None else request.t_max_ms)
+    if t_min_ms > t_max_ms:
+        raise ValueError("animation t_min_ms must not exceed t_max_ms")
+    candidate_indexes = np.flatnonzero((time_ms >= t_min_ms) & (time_ms <= t_max_ms))
+    if not len(candidate_indexes):
+        raise ValueError(
+            f"animation time range {t_min_ms:g}..{t_max_ms:g} ms has no samples"
+        )
+    frame_indexes = np.unique(
+        np.linspace(
+            candidate_indexes[0],
+            candidate_indexes[-1],
+            min(int(frame_count), len(candidate_indexes)),
+            dtype=int,
+        )
+    )
+    voltage_mV = np.asarray(result["voltage_mV"][unit_index], dtype=float)
+    effective_g_nmda_nS = np.asarray(
+        result["effective_g_nmda_nS"][unit_index], dtype=float
+    )
+    s_nmda = np.asarray(result["s_nmda"][unit_index], dtype=float)
+    g_ampa_nS = np.asarray(result["g_ampa_nS"][unit_index], dtype=float)
+    voltage_grid_mV = np.linspace(-90.0, 20.0, 500)
+    magnesium_coefficient = float(experiment.magnesium) / 3.57
+    sigma_grid = 1.0 / (
+        1.0 + np.exp(-0.08 * voltage_grid_mV) * magnesium_coefficient
+    )
+    g_leak_nS = float(experiment.g_L / nS)
+    e_leak_mV = float(experiment.E_L / mV)
+    e_excitatory_mV = float(experiment.E_E / mV)
+    capacitance_nF = float(experiment.C_m / nF)
+    g_nmda_max_per_source_nS = float(experiment.g_nmda_max / nS) / experiment.n_nmda
+
+    def nullcline_for(s_value, g_ampa_value_nS):
+        open_g_nmda_nS = g_nmda_max_per_source_nS * s_value
+        total_current_pA = (
+            g_leak_nS * (voltage_grid_mV - e_leak_mV)
+            + g_ampa_value_nS * (voltage_grid_mV - e_excitatory_mV)
+            + open_g_nmda_nS
+            * sigma_grid
+            * (voltage_grid_mV - e_excitatory_mV)
+        )
+        return -1e-3 * total_current_pA / capacitance_nF
+
+    nullclines = [
+        nullcline_for(s_nmda[index], g_ampa_nS[index])
+        for index in frame_indexes
+    ]
+    theoretical_s0 = compute_theoretical_s0(experiment)
+    theoretical_s0_nullcline = nullcline_for(
+        theoretical_s0,
+        float(np.mean(g_ampa_nS[candidate_indexes])),
+    )
+    theoretical_ito_corrected_nullcline = (
+        theoretical_s0_nullcline
+        + compute_theoretical_ito_correction(experiment, voltage_grid_mV)
+    )
+    axes = create_fitted_nullcline_figure()
+    figure = axes["fig"]
+    axes["model_ax"].axis("off")
+    axes["model_ax"].text(
+        0.5,
+        0.5,
+        r"$C_m dV/dt=-I_L-I_{AMPA}-I_{NMDA}$" "\n"
+        r"$g_{NMDA}=g_{NMDA,max}s(t)\sigma_{Mg}(V)$",
+        ha="center",
+        va="center",
+        fontsize=12,
+    )
+    panels = (
+        ("voltage_ax", voltage_mV, r"$V(t)$", "V [mV]", "tab:blue"),
+        ("g_nmda_ax", effective_g_nmda_nS, r"$g_{NMDA}(t)$", "g_NMDA [nS]", "tab:green"),
+        ("s_ax", s_nmda, r"$s(t)$", "s", "tab:purple"),
+    )
+    active_lines = []
+    points = []
+    for axis_name, values, title_text, ylabel, color in panels:
+        axis = axes[axis_name]
+        axis.plot(time_ms[candidate_indexes], values[candidate_indexes], color="0.75")
+        axis.set(xlim=(t_min_ms, t_max_ms), title=title_text, xlabel="t [ms]", ylabel=ylabel)
+        value_min = float(np.min(values[candidate_indexes]))
+        value_max = float(np.max(values[candidate_indexes]))
+        padding = max((value_max - value_min) * 0.1, 1e-6)
+        axis.set_ylim(value_min - padding, value_max + padding)
+        active_lines.append(axis.plot([], [], color=color, linewidth=2)[0])
+        points.append(axis.plot([], [], "o", color=color)[0])
+    nullcline_axis = axes["nullcline_ax"]
+    nullcline_axis.axhline(0.0, color="black", linewidth=1)
+    # Draw the stationary s_0 reference first, behind the moving nullcline.
+    nullcline_axis.plot(
+        voltage_grid_mV,
+        theoretical_s0_nullcline,
+        linestyle="-.",
+        color="tab:red",
+        linewidth=1.8,
+        label=rf"theoretical $s_0={theoretical_s0:.4g}$",
+    )
+    nullcline_axis.plot(
+        voltage_grid_mV,
+        theoretical_ito_corrected_nullcline,
+        linestyle=":",
+        color="tab:purple",
+        linewidth=2.0,
+        label=r"theoretical $s_0$ nullcline + Itô correction",
+    )
+    theoretical_intersections = estimate_zero_crossings(
+        voltage_grid_mV, theoretical_s0_nullcline
+    )
+    theoretical_stable, theoretical_unstable = classify_intersection_stability(
+        theoretical_intersections
+    )
+    nullcline_axis.plot(
+        theoretical_stable,
+        np.zeros_like(theoretical_stable),
+        "D",
+        color="tab:red",
+        markerfacecolor="tab:red",
+        markersize=6,
+        linestyle="None",
+        label=r"theoretical $s_0$ stable fixed point",
+    )
+    if theoretical_unstable.size:
+        nullcline_axis.plot(
+            theoretical_unstable,
+            np.zeros_like(theoretical_unstable),
+            "D",
+            color="tab:red",
+            markerfacecolor="none",
+            markersize=6,
+            linestyle="None",
+            label=r"theoretical $s_0$ unstable fixed point",
+        )
+    nullcline_axis.set(
+        xlim=(-90, 20),
+        ylim=derivative_ylim(
+            np.concatenate(
+                [
+                    *nullclines,
+                    theoretical_s0_nullcline,
+                    theoretical_ito_corrected_nullcline,
+                ]
+            )
+        ),
+        title=r"$dV/dt(V; s(t), g_{AMPA}(t))$",
+        xlabel="V [mV]",
+        ylabel="dV/dt [mV/ms]",
+    )
+    nullcline_line = nullcline_axis.plot([], [], color="tab:orange", linewidth=2)[0]
+    nullcline_axis.legend(loc="best", fontsize=8)
+    nullcline_point = nullcline_axis.plot([], [], "o", color="tab:orange")[0]
+    stable_points = nullcline_axis.plot([], [], "o", color="black", linestyle="None")[0]
+    unstable_points = nullcline_axis.plot(
+        [], [], "o", color="black", markerfacecolor="none", linestyle="None"
+    )[0]
+    voltage_line = nullcline_axis.axvline(0.0, color="tab:blue", linewidth=1)
+    title = figure.suptitle("")
+
+    def update(frame_number):
+        index = int(frame_indexes[frame_number])
+        visible = np.arange(candidate_indexes[0], index + 1)
+        for line, point, (_, values, _, _, _) in zip(active_lines, points, panels):
+            line.set_data(time_ms[visible], values[visible])
+            point.set_data([time_ms[index]], [values[index]])
+        nullcline = nullclines[frame_number]
+        nullcline_line.set_data(voltage_grid_mV, nullcline)
+        current_v_mV = voltage_mV[index]
+        current_dvdt = float(np.interp(current_v_mV, voltage_grid_mV, nullcline))
+        nullcline_point.set_data([current_v_mV], [current_dvdt])
+        voltage_line.set_xdata([current_v_mV, current_v_mV])
+        intersections = estimate_zero_crossings(voltage_grid_mV, nullcline)
+        stable, unstable = classify_intersection_stability(intersections)
+        stable_points.set_data(stable, np.zeros_like(stable))
+        unstable_points.set_data(unstable, np.zeros_like(unstable))
+        title.set_text(
+            f"Summed NMDA moving nullcline: r_e={request.r_e_hz:g} Hz, "
+            f"unit={display_unit_index}, seed={experiment.random_seed}\n"
+            f"{_experiment_nmda_time_constants_title(experiment)}\n"
+            f"t={time_ms[index]:.1f} ms, V={current_v_mV:.2f} mV, "
+            f"g_NMDA={effective_g_nmda_nS[index]:.3g} nS, "
+            f"s={s_nmda[index]:.3g}, theoretical s_0={theoretical_s0:.4g}"
+        )
+        return (*active_lines, *points, nullcline_line, nullcline_point,
+                stable_points, unstable_points, voltage_line, title)
+
+    animation = FuncAnimation(
+        figure, update, frames=len(frame_indexes), interval=1000 / fps, blit=False
+    )
+    figure.subplots_adjust(left=0.06, right=0.98, bottom=0.08, top=0.86)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    writer = (
+        PillowWriter(fps=fps)
+        if output_format == "gif"
+        else FFMpegWriter(fps=fps, codec="mpeg4", bitrate=2400)
+    )
+    animation.save(output_path, writer=writer, dpi=150)
+    plt.close(figure)
+    return output_path
+
+
+def generate_summed_nmda_moving_nullcline_animation_from_saved_trace(
+    saved_trace,
+    output_path,
+    *,
+    t_min_ms=None,
+    t_max_ms=None,
+    frame_count=1_000,
+    fps=20,
+    output_format="mp4",
+):
+    """Regenerate a complete animation from a saved unit trace CSV payload."""
+    result = {
+        "time_ms": np.asarray(saved_trace["time_ms"], dtype=float),
+        "voltage_mV": np.asarray(saved_trace["voltage_mV"], dtype=float)[None, :],
+        "effective_g_nmda_nS": np.asarray(
+            saved_trace["effective_g_nmda_nS"], dtype=float
+        )[None, :],
+        "s_nmda": np.asarray(saved_trace["s_nmda"], dtype=float)[None, :],
+        "g_ampa_nS": np.asarray(saved_trace["g_ampa_nS"], dtype=float)[None, :],
+    }
+    experiment = SimpleNamespace(
+        n_models=1,
+        n_nmda=int(saved_trace["n_nmda"]),
+        r_e=float(saved_trace["r_e_hz"]) * Hz,
+        random_seed=int(saved_trace["random_seed"]),
+        magnesium=float(saved_trace["magnesium"]),
+        g_nmda_max=float(saved_trace["g_nmda_max_nS"]) * nS,
+        g_L=float(saved_trace["g_leak_nS"]) * nS,
+        E_L=float(saved_trace["e_leak_mV"]) * mV,
+        E_E=float(saved_trace["e_excitatory_mV"]) * mV,
+        C_m=float(saved_trace["capacitance_nF"]) * nF,
+        tau_nmda_rise=float(saved_trace["tau_nmda_rise_ms"]) * ms,
+        tau_nmda_decay=float(saved_trace["tau_nmda_decay_ms"]) * ms,
+        alpha_nmda=float(saved_trace["alpha_nmda_per_ms"]) * kHz,
+        w_nmda=float(saved_trace["w_nmda"]),
+    )
+    request = SummedNmdaAnimationRequest(
+        r_e_hz=float(saved_trace["r_e_hz"]),
+        unit_index=0,
+        t_min_ms=t_min_ms,
+        t_max_ms=t_max_ms,
+        output_format=output_format,
+        frame_count=frame_count,
+        fps=fps,
+    )
+    return generate_summed_nmda_moving_nullcline_animation(
+        result,
+        experiment,
+        request,
+        output_path,
+        display_unit_index=int(saved_trace["unit_index"]),
+    )
+
+
 def compute_summed_per_unit_s0_and_fixed_points(
     result,
     experiment,
@@ -642,6 +1235,7 @@ def plot_voltage_and_fixed_point_distributions(
     output_path,
     *,
     show_plots=False,
+    experiment=None,
 ):
     """Plot voltage/fixed-point distributions and per-neuron mean s below."""
     voltage_mV = np.asarray(result["voltage_mV"], dtype=float).ravel()
@@ -714,7 +1308,11 @@ def plot_voltage_and_fixed_point_distributions(
     s0_axis.set_xlabel(r"per-neuron mean $s_0^{(i)}=\langle s_{NMDA}^{(i)}\rangle$")
     s0_axis.set_ylabel("number of neurons")
     s0_axis.set_title(f"Distribution of all {s0.size:,} per-neuron mean s values")
-    figure.tight_layout()
+    if experiment is not None:
+        figure.suptitle(_experiment_nmda_time_constants_title(experiment))
+        figure.tight_layout(rect=(0, 0, 1, 0.96))
+    else:
+        figure.tight_layout()
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output_path, dpi=200, bbox_inches="tight")
@@ -733,6 +1331,7 @@ def _run_one_summed_input_strength(
     diagnostic_model_indices,
     plot_fixed_point_distributions,
     show_plots,
+    animation_requests,
 ):
     """Pickle-safe worker for one independent Brian2 strength simulation."""
     experiment = base_experiment.with_property(**{parameter_name: value})
@@ -769,7 +1368,38 @@ def _run_one_summed_input_strength(
         "mean_effective_g_nmda_nS": float(
             np.mean(result["effective_g_nmda_nS"])
         ),
+        "tau_nmda_rise_ms": float(experiment.tau_nmda_rise / ms),
+        "tau_nmda_decay_ms": float(experiment.tau_nmda_decay / ms),
     }
+    saved_trace_units = set()
+    for animation_request in animation_requests:
+        if animation_request.unit_index not in saved_trace_units:
+            save_summed_nmda_unit_trace_csv(
+                result,
+                experiment,
+                animation_request.unit_index,
+                Path(output_dir)
+                / "trace_data"
+                / summed_nmda_trace_filename(
+                    display_value,
+                    animation_request.unit_index,
+                    experiment.random_seed,
+                ),
+            )
+            saved_trace_units.add(animation_request.unit_index)
+        animation_path = (
+            Path(output_dir)
+            / "animations"
+            / summed_nmda_animation_filename(
+                animation_request, experiment.random_seed
+            )
+        )
+        generate_summed_nmda_moving_nullcline_animation(
+            result,
+            experiment,
+            animation_request,
+            animation_path,
+        )
     if diagnostic_model_indices is not None:
         plot_summed_nmda_three_neuron_diagnostics(
             result,
@@ -808,7 +1438,8 @@ def _run_one_summed_input_strength(
                 "Initial V: uniform["
                 f"{float(experiment.initial_voltage_min / mV):g}, "
                 f"{float(experiment.initial_voltage_max / mV):g}] mV; "
-                f"seed={experiment.random_seed}"
+                f"seed={experiment.random_seed}\n"
+                f"{_experiment_nmda_time_constants_title(experiment)}"
             ),
         )
     if plot_fixed_point_distributions:
@@ -825,6 +1456,7 @@ def _run_one_summed_input_strength(
             fixed_point_result,
             Path(output_dir) / fixed_point_name,
             show_plots=show_plots,
+            experiment=experiment,
         )
     return row
 
@@ -886,6 +1518,7 @@ def screen_summed_nmda_input_strengths(
     plot_fixed_point_distributions=False,
     n_jobs=4,
     joblib_backend="loky",
+    animation_requests=(),
 ):
     """Run a strength scan and save a compact CSV and summary plot.
 
@@ -902,6 +1535,18 @@ def screen_summed_nmda_input_strengths(
 
     if n_jobs < 1:
         raise ValueError("n_jobs must be at least 1")
+    animation_requests = tuple(animation_requests)
+    if animation_requests and parameter_name != "r_e":
+        raise ValueError("animation_requests are only supported for an r_e scan")
+
+    def requests_for(value):
+        rate_hz = float(value / Hz)
+        return tuple(
+            request
+            for request in animation_requests
+            if np.isclose(float(request.r_e_hz), rate_hz)
+        )
+
     worker_show_plots = show_plots and n_jobs == 1
     if n_jobs == 1:
         rows = [
@@ -913,6 +1558,7 @@ def screen_summed_nmda_input_strengths(
                 diagnostic_model_indices,
                 plot_fixed_point_distributions,
                 worker_show_plots,
+                requests_for(value),
             )
             for value in values
         ]
@@ -930,6 +1576,7 @@ def screen_summed_nmda_input_strengths(
                 diagnostic_model_indices,
                 plot_fixed_point_distributions,
                 worker_show_plots,
+                requests_for(value),
             )
             for value in values
         )
@@ -961,7 +1608,8 @@ def screen_summed_nmda_input_strengths(
     axes[1].plot(strengths, [row["mean_s_nmda"] for row in rows], "o-")
     axes[1].set_ylabel("mean summed s_NMDA")
     axes[1].set_xlabel(parameter_name)
-    figure.tight_layout()
+    figure.suptitle(_experiment_nmda_time_constants_title(base_experiment))
+    figure.tight_layout(rect=(0, 0, 1, 0.96))
     plot_path = output_dir / f"summed_nmda_{parameter_name}_scan.png"
     figure.savefig(plot_path, dpi=200, bbox_inches="tight")
     if show_plots:
@@ -1067,11 +1715,30 @@ class SimulateSummedNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
 
     def test_screen_input_rates_nmda_only(self, show_plots=True):
         """Scan r_e from 1--49 Hz using three isolated Joblib workers."""
-        rates = np.arange(1.0, 50.0) * Hz
+        rates = np.arange(25.0, 50.0) * Hz
         experiment = AmpaNmdaExperimentConfig.from_fitted_apic20().with_property(
             w_ampa=0 * nS
         )
         output_dir = SUMMED_OUTPUT_DIR / "nmda_only" / "rate_scan"
+        # Edit this list to choose rate/unit traces and optional post-burn-in
+        # time windows.  Omit t_min_ms/t_max_ms to animate the complete trace.
+        # MP4 streams frames through FFmpeg and therefore supports far more
+        # frames without retaining the whole animation in memory like GIF.
+        video_settings = {
+            "output_format": "mp4",
+            "frame_count": 1_000,
+            "fps": 30,
+        }
+        animation_requests = [
+            SummedNmdaAnimationRequest(r_e_hz=30, unit_index=0, **video_settings),
+            SummedNmdaAnimationRequest(r_e_hz=30, unit_index=2, **video_settings),
+            SummedNmdaAnimationRequest(r_e_hz=28, unit_index=0, **video_settings),
+            SummedNmdaAnimationRequest(r_e_hz=28, unit_index=1, **video_settings),
+            SummedNmdaAnimationRequest(r_e_hz=28, unit_index=2, **video_settings),
+            SummedNmdaAnimationRequest(r_e_hz=25, unit_index=0, **video_settings),
+            SummedNmdaAnimationRequest(r_e_hz=25, unit_index=1, **video_settings),
+            SummedNmdaAnimationRequest(r_e_hz=25, unit_index=2, **video_settings),
+        ]
         rows, csv_path, plot_path = screen_summed_nmda_input_strengths(
             "r_e",
             rates,
@@ -1084,11 +1751,31 @@ class SimulateSummedNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
             plot_fixed_point_distributions=True,
             n_jobs=3,
             joblib_backend="loky",
+            animation_requests=animation_requests,
         )
         self.assertEqual(len(rows), 49)
         self.assertTrue(all(row["mean_g_ampa_nS"] == 0.0 for row in rows))
         self.assertTrue(csv_path.exists())
         self.assertTrue(plot_path.exists())
+        for animation_request in animation_requests:
+            trace_path = (
+                output_dir
+                / "trace_data"
+                / summed_nmda_trace_filename(
+                    animation_request.r_e_hz,
+                    animation_request.unit_index,
+                    experiment.random_seed,
+                )
+            )
+            animation_path = (
+                output_dir
+                / "animations"
+                / summed_nmda_animation_filename(
+                    animation_request, experiment.random_seed
+                )
+            )
+            self.assertTrue(trace_path.exists(), trace_path)
+            self.assertTrue(animation_path.exists(), animation_path)
         for rate_hz in range(1, 50):
             diagnostic_plot_path = (
                 output_dir / f"summed_nmda_r_e_{rate_hz:g}_diagnostics.png"
