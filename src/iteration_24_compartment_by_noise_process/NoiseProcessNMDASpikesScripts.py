@@ -24,8 +24,6 @@ from iteration_21_nmda_spikes_under_ei_balance.GeneralizedLambert import (
     find_fixed_points,
     fixed_point_current_slope,
 )
-
-
 OUTPUT_DIR = Path(__file__).resolve().parent / "plot_output_noise_limit"
 GAUSSIAN_FIT_SAMPLE_COUNT = 1_500_000
 
