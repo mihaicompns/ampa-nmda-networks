@@ -149,6 +149,7 @@ class AmpaNmdaExperimentConfig:
     initial_voltage_min: object = field(default_factory=lambda: -80 * mV)
     initial_voltage_max: object = field(default_factory=lambda: 0 * mV)
     magnesium_block_tau: object = None
+    with_nullcline: bool = False
 
     def with_property(self, **changes):
         return replace(self, **changes)
@@ -239,13 +240,23 @@ TRACE_MODEL_EQUATIONS = (
 TRACE_DYNAMIC_MAGNESIUM_MODEL_EQUATIONS = TRACE_MODEL_EQUATIONS
 
 
-def _fit_gaussian_mixture(values, number_of_components, random_seed=21):
+def _fit_gaussian_mixture(
+    values,
+    number_of_components,
+    random_seed=21,
+    maximum_sample_count=500_000,
+):
     """Fit a small one-dimensional Gaussian mixture by deterministic EM."""
     values = np.asarray(values, dtype=float).ravel()
     values = values[np.isfinite(values)]
-    if values.size > 500_000:
+    maximum_sample_count = int(maximum_sample_count)
+    if maximum_sample_count < 1:
+        raise ValueError("maximum_sample_count must be at least 1")
+    if values.size > maximum_sample_count:
         rng = np.random.default_rng(random_seed)
-        values = values[rng.choice(values.size, 500_000, replace=False)]
+        values = values[
+            rng.choice(values.size, maximum_sample_count, replace=False)
+        ]
     if values.size < max(5, number_of_components + 1):
         raise ValueError("Not enough finite samples for Gaussian fitting")
     means = np.percentile(
@@ -1622,7 +1633,7 @@ def screen_summed_nmda_input_strengths(
 class SimulateSummedNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
     """IDE runnables matching the original script's strength screens."""
 
-    def test_simulate_one_input_rate(self, r_e=20 * Hz, show_plots=True):
+    def test_simulate_one_input_rate(self, r_e=25 * Hz, show_plots=True):
         """Run one editable input rate and save its CSV and summary plot."""
         rate_hz = float(r_e / Hz)
         rows, csv_path, plot_path = screen_summed_nmda_input_strengths(
@@ -1727,7 +1738,7 @@ class SimulateSummedNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
         video_settings = {
             "output_format": "mp4",
             "frame_count": 1_000,
-            "fps": 30,
+            "fps": 40,
         }
         animation_requests = [
             SummedNmdaAnimationRequest(r_e_hz=30, unit_index=0, **video_settings),

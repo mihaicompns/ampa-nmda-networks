@@ -257,14 +257,8 @@ def plot_ito_reduced_nmda_voltage(
     )
     axes[0].plot(
         voltage_mV,
-        terms["ito_correction_mV_per_ms"],
-        label=r"Itô correction $a_{\mathrm{corr}}(V)$",
-        color="tab:orange",
-    )
-    axes[0].plot(
-        voltage_mV,
         terms["total_drift_mV_per_ms"],
-        label=r"total drift $a_{\mathrm{It\hat{o}}}(V)=f(V)+a_{\mathrm{corr}}(V)$",
+        label=r"total Itô drift $a_{\mathrm{It\hat{o}}}(V)$",
         color="black",
         linewidth=2.2,
     )
