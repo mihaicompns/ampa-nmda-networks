@@ -322,6 +322,29 @@ def _fit_gaussian_mixture(
     }
 
 
+def _evaluate_gaussian_mixture_density(fit, evaluation_grid):
+    """Evaluate fitted weighted Gaussian components on any voltage grid."""
+    evaluation_grid = np.asarray(evaluation_grid, dtype=float)
+    weights = np.asarray(fit["weights"], dtype=float)
+    means = np.asarray(fit["means"], dtype=float)
+    standard_deviations = np.asarray(
+        fit["standard_deviations"], dtype=float
+    )
+    components = (
+        weights[None, :]
+        / (standard_deviations[None, :] * np.sqrt(2.0 * np.pi))
+        * np.exp(
+            -0.5
+            * (
+                (evaluation_grid[:, None] - means[None, :])
+                / standard_deviations[None, :]
+            )
+            ** 2
+        )
+    )
+    return components, components.sum(axis=1)
+
+
 def _summed_shot_noise_summary(result, experiment):
     """Return common theory/data cumulant summaries for every synaptic state."""
     return compute_shot_noise_gaussianity_summary(
@@ -831,7 +854,9 @@ def plot_summed_nmda_trace_snapshot(saved_trace, snapshot_time_ms, output_path):
     nullcline_axis.axhline(0.0, color="black", linewidth=1)
     nullcline_axis.plot(voltage_grid_mV, nullcline, color="tab:orange", linewidth=2)
     current_v_mV = float(saved_trace["voltage_mV"][index])
-    current_dvdt = float(np.interp(current_v_mV, voltage_grid_mV, nullcline))
+    current_dvdt = float(
+        _saved_trace_nullcline(saved_trace, index, current_v_mV)
+    )
     nullcline_axis.plot([current_v_mV], [current_dvdt], "o", color="tab:orange")
     nullcline_axis.axvline(current_v_mV, color="tab:blue", linewidth=1)
     intersections = estimate_zero_crossings(voltage_grid_mV, nullcline)
@@ -924,32 +949,35 @@ def generate_summed_nmda_moving_nullcline_animation(
     g_ampa_nS = np.asarray(result["g_ampa_nS"][unit_index], dtype=float)
     voltage_grid_mV = np.linspace(-90.0, 20.0, 500)
     magnesium_coefficient = float(experiment.magnesium) / 3.57
-    sigma_grid = 1.0 / (
-        1.0 + np.exp(-0.08 * voltage_grid_mV) * magnesium_coefficient
-    )
     g_leak_nS = float(experiment.g_L / nS)
     e_leak_mV = float(experiment.E_L / mV)
     e_excitatory_mV = float(experiment.E_E / mV)
     capacitance_nF = float(experiment.C_m / nF)
     g_nmda_max_per_source_nS = float(experiment.g_nmda_max / nS) / experiment.n_nmda
 
-    def nullcline_for(s_value, g_ampa_value_nS):
+    def nullcline_for(voltage_values_mV, s_value, g_ampa_value_nS):
+        voltage_values_mV = np.asarray(voltage_values_mV, dtype=float)
+        sigma = 1.0 / (
+            1.0
+            + np.exp(-0.08 * voltage_values_mV) * magnesium_coefficient
+        )
         open_g_nmda_nS = g_nmda_max_per_source_nS * s_value
         total_current_pA = (
-            g_leak_nS * (voltage_grid_mV - e_leak_mV)
-            + g_ampa_value_nS * (voltage_grid_mV - e_excitatory_mV)
+            g_leak_nS * (voltage_values_mV - e_leak_mV)
+            + g_ampa_value_nS * (voltage_values_mV - e_excitatory_mV)
             + open_g_nmda_nS
-            * sigma_grid
-            * (voltage_grid_mV - e_excitatory_mV)
+            * sigma
+            * (voltage_values_mV - e_excitatory_mV)
         )
         return -1e-3 * total_current_pA / capacitance_nF
 
     nullclines = [
-        nullcline_for(s_nmda[index], g_ampa_nS[index])
+        nullcline_for(voltage_grid_mV, s_nmda[index], g_ampa_nS[index])
         for index in frame_indexes
     ]
     theoretical_s0 = compute_theoretical_s0(experiment)
     theoretical_s0_nullcline = nullcline_for(
+        voltage_grid_mV,
         theoretical_s0,
         float(np.mean(g_ampa_nS[candidate_indexes])),
     )
@@ -1066,7 +1094,13 @@ def generate_summed_nmda_moving_nullcline_animation(
         nullcline = nullclines[frame_number]
         nullcline_line.set_data(voltage_grid_mV, nullcline)
         current_v_mV = voltage_mV[index]
-        current_dvdt = float(np.interp(current_v_mV, voltage_grid_mV, nullcline))
+        current_dvdt = float(
+            nullcline_for(
+                current_v_mV,
+                s_nmda[index],
+                g_ampa_nS[index],
+            )
+        )
         nullcline_point.set_data([current_v_mV], [current_dvdt])
         voltage_line.set_xdata([current_v_mV, current_v_mV])
         intersections = estimate_zero_crossings(voltage_grid_mV, nullcline)
@@ -1667,7 +1701,7 @@ class SimulateSummedNMDASpikesUnderEIBalanceScriptTestCases(unittest.TestCase):
             diagnostic_plot_path, fixed_point_plot_path,
         )
 
-    def test_simulate_one_input_rate_nmda_only(self, r_e=20 * Hz, show_plots=True):
+    def test_simulate_one_input_rate_nmda_only(self, r_e=28 * Hz, show_plots=True):
         """Run summed NMDA input with both AMPA conductance paths disabled."""
         rate_hz = float(r_e / Hz)
         experiment = AmpaNmdaExperimentConfig.from_fitted_apic20(r_e=r_e).with_property(

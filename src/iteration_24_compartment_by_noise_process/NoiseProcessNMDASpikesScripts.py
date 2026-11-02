@@ -17,6 +17,7 @@ from brian2.units import Hz
 
 from iteration_21_nmda_spikes_under_ei_balance.SimulateSummedNMDASpikesUnderEIBalanceScripts import (
     AmpaNmdaExperimentConfig,
+    _evaluate_gaussian_mixture_density,
     _fit_gaussian_mixture,
     simulate_ampa_nmda_single_compartment_ensemble_with_summed_nmda_input,
 )
@@ -25,6 +26,7 @@ from iteration_21_nmda_spikes_under_ei_balance.GeneralizedLambert import (
     fixed_point_current_slope,
 )
 OUTPUT_DIR = Path(__file__).resolve().parent / "plot_output_noise_limit"
+SHOW_GAUSSIAN_COMPONENT_MEAN_VARIANCE_PLOT = False
 GAUSSIAN_FIT_SAMPLE_COUNT = 1_500_000
 
 
@@ -419,11 +421,110 @@ def plot_noise_limit_method_comparison(
     return output_path
 
 
+def plot_brian2_vs_noise_voltage_distribution(
+    histogram_axis,
+    fit_axis,
+    brian2_voltage_mV,
+    noise_voltage_mV,
+    *,
+    bins=80,
+):
+    """Overlay post-burn-in Brian2 and local-noise voltage distributions.
+
+    Both histograms use identical bin edges, and both two-Gaussian mixtures
+    are evaluated on one voltage grid.  This makes differences between the
+    reference shot-noise model and the local noise approximation visible
+    without conflating them with different histogram bins or fit grids.
+    """
+    brian2_values = np.asarray(brian2_voltage_mV, dtype=float).ravel()
+    noise_values = np.asarray(noise_voltage_mV, dtype=float).ravel()
+    voltage_min = float(min(brian2_values.min(), noise_values.min()))
+    voltage_max = float(max(brian2_values.max(), noise_values.max()))
+    histogram_edges = np.linspace(voltage_min, voltage_max, int(bins) + 1)
+
+    histogram_axis.hist(
+        brian2_values,
+        bins=histogram_edges,
+        density=True,
+        histtype="stepfilled",
+        color="tab:blue",
+        edgecolor="tab:blue",
+        alpha=0.50,
+        label=f"Brian2 (n={brian2_values.size:,})",
+    )
+    histogram_axis.hist(
+        noise_values,
+        bins=histogram_edges,
+        density=True,
+        histtype="stepfilled",
+        color="tab:green",
+        edgecolor="tab:green",
+        alpha=0.50,
+        label=f"local noise (n={noise_values.size:,})",
+    )
+    histogram_axis.set(
+        title="Brian2 vs local: histogram",
+        xlabel="V [mV]",
+        ylabel="density",
+    )
+    histogram_axis.legend(loc="best", fontsize=8)
+
+    common_grid = np.linspace(voltage_min, voltage_max, 600)
+    fits = {}
+    for label, values, color in (
+        ("Brian2", brian2_values, "tab:blue"),
+        ("local noise", noise_values, "tab:green"),
+    ):
+        fit = _fit_gaussian_mixture(
+            values,
+            2,
+            maximum_sample_count=GAUSSIAN_FIT_SAMPLE_COUNT,
+        )
+        component_densities, mixture_density = (
+            _evaluate_gaussian_mixture_density(fit, common_grid)
+        )
+        for component_number, component_density in enumerate(
+            component_densities.T, start=1
+        ):
+            fit_axis.plot(
+                common_grid,
+                component_density,
+                ":",
+                color=color,
+                linewidth=1.2,
+                label=f"{label} G{component_number}",
+            )
+        fit_axis.plot(
+            common_grid,
+            mixture_density,
+            color=color,
+            linewidth=2.5,
+            label=f"{label} mixture",
+        )
+        fit_axis.fill_between(
+            common_grid, 0, mixture_density, color=color, alpha=0.50
+        )
+        fits[label] = fit
+
+    fit_axis.set(
+        title="Brian2 vs local: 2-Gaussian fits",
+        xlabel="V [mV]",
+        ylabel="density",
+    )
+    fit_axis.legend(loc="best", fontsize=8)
+    return {
+        "histogram_edges": histogram_edges,
+        "common_grid_mV": common_grid,
+        "brian2_fit": fits["Brian2"],
+        "noise_fit": fits["local noise"],
+    }
+
+
 def plot_single_noise_limit_method(
     result,
     experiment,
     *,
-    brian2_result,
+    brian2_result=None,
     chosen_model_indices=(0, 1),
     output_path=None,
     show_plot=False,
@@ -510,9 +611,13 @@ def plot_single_noise_limit_method(
 
     # Row 1: like iteration 21, both traces and fitted distributions use only
     # samples retained after burn-in.
-    population_trace_axis = figure.add_subplot(grid[1, 0])
+    population_trace_axis = figure.add_subplot(
+        grid[1, 0], sharey=brian2_trace_axis
+    )
     population_distribution_axis = figure.add_subplot(
-        grid[1, 1], sharey=population_trace_axis
+        grid[1, 1],
+        sharex=brian2_distribution_axis,
+        sharey=brian2_distribution_axis,
     )
     for model_index in chosen_model_indices:
         population_trace_axis.plot(
@@ -537,8 +642,14 @@ def plot_single_noise_limit_method(
     # Row 2: only unit 0 gets its own trace/distribution row.  Unit 1 remains
     # visible in the shared Brian2 and noise-limit panels above.
     for row, model_index in enumerate(chosen_model_indices[:1], start=2):
-        trace_axis = figure.add_subplot(grid[row, 0])
-        distribution_axis = figure.add_subplot(grid[row, 1], sharey=trace_axis)
+        trace_axis = figure.add_subplot(
+            grid[row, 0], sharey=brian2_trace_axis
+        )
+        distribution_axis = figure.add_subplot(
+            grid[row, 1],
+            sharex=brian2_distribution_axis,
+            sharey=brian2_distribution_axis,
+        )
         color = f"C{row - 2}"
         trace_axis.plot(
             result["time_ms"],
@@ -667,6 +778,7 @@ def plot_population_vs_compartment_histogram(
     result,
     experiment,
     *,
+    brian2_result=None,
     compartment_index=0,
     output_path=None,
     show_plot=False,
@@ -698,12 +810,33 @@ def plot_population_vs_compartment_histogram(
         compartment_values, 2, maximum_sample_count=GAUSSIAN_FIT_SAMPLE_COUNT
     )
 
-    figure = plt.figure(figsize=(14, 17))
-    grid = figure.add_gridspec(3, 2, height_ratios=(1, 1, 1.15), hspace=0.35)
-    compartment_axis = figure.add_subplot(grid[0, :])
-    population_axis = figure.add_subplot(grid[1, :], sharex=compartment_axis)
+    figure = plt.figure(figsize=(20, 17))
+    grid = figure.add_gridspec(
+        3, 3,
+        width_ratios=(1, 1, 1.15),
+        height_ratios=(1, 1, 1.15),
+        hspace=0.35,
+        wspace=0.25,
+    )
+    compartment_axis = figure.add_subplot(grid[0, :2])
+    population_axis = figure.add_subplot(grid[1, :2], sharex=compartment_axis)
     histogram_overlap_axis = figure.add_subplot(grid[2, 0])
     gaussian_overlap_axis = figure.add_subplot(grid[2, 1], sharex=histogram_overlap_axis)
+    if brian2_result is not None:
+        brian2_comparison_histogram_axis = figure.add_subplot(grid[0, 2])
+        brian2_comparison_fit_axis = figure.add_subplot(
+            grid[1, 2], sharex=brian2_comparison_histogram_axis
+        )
+        plot_brian2_vs_noise_voltage_distribution(
+            brian2_comparison_histogram_axis,
+            brian2_comparison_fit_axis,
+            brian2_result["voltage_mV"],
+            result["voltage_mV"],
+        )
+    else:
+        figure.add_subplot(grid[0, 2]).axis("off")
+        figure.add_subplot(grid[1, 2]).axis("off")
+    figure.add_subplot(grid[2, 2]).axis("off")
 
     def plot_histogram_and_fit(axis, values, fit, color, label):
         axis.hist(
@@ -767,18 +900,16 @@ def plot_population_vs_compartment_histogram(
         color="tab:orange",
         label=f"compartment {compartment_index}",
     )
-    # Shade the full support of both histograms, not only their difference.
-    # Opposing hatches keep both distributions identifiable in overlap regions.
+    # Show both full distributions in the same colors as their outline curves.
     histogram_overlap_axis.fill_between(
         centers,
         0,
         population_histogram,
         step="mid",
-        facecolor="0.65",
-        edgecolor="black",
-        hatch="///",
+        facecolor="black",
+        edgecolor="none",
         linewidth=0.0,
-        alpha=0.40,
+        alpha=0.50,
         label="population area",
     )
     histogram_overlap_axis.fill_between(
@@ -787,10 +918,9 @@ def plot_population_vs_compartment_histogram(
         compartment_histogram,
         step="mid",
         facecolor="tab:orange",
-        edgecolor="tab:orange",
-        hatch="\\\\\\",
+        edgecolor="none",
         linewidth=0.0,
-        alpha=0.40,
+        alpha=0.50,
         label=f"compartment {compartment_index} area",
     )
     histogram_overlap_axis.fill_between(
@@ -810,11 +940,11 @@ def plot_population_vs_compartment_histogram(
     histogram_overlap_axis.legend(fontsize=8)
 
     common_grid = np.linspace(voltage_min, voltage_max, 600)
-    population_density = np.interp(
-        common_grid, population_fit["grid"], population_fit["mixture_density"]
+    _, population_density = _evaluate_gaussian_mixture_density(
+        population_fit, common_grid
     )
-    compartment_density = np.interp(
-        common_grid, compartment_fit["grid"], compartment_fit["mixture_density"]
+    _, compartment_density = _evaluate_gaussian_mixture_density(
+        compartment_fit, common_grid
     )
     gaussian_overlap_axis.plot(
         common_grid, population_density, color="black", linewidth=2.5,
@@ -823,6 +953,22 @@ def plot_population_vs_compartment_histogram(
     gaussian_overlap_axis.plot(
         common_grid, compartment_density, color="tab:orange", linewidth=2.5,
         label=f"compartment {compartment_index} fit",
+    )
+    gaussian_overlap_axis.fill_between(
+        common_grid,
+        0,
+        population_density,
+        color="black",
+        alpha=0.50,
+        label="population fit area",
+    )
+    gaussian_overlap_axis.fill_between(
+        common_grid,
+        0,
+        compartment_density,
+        color="tab:orange",
+        alpha=0.50,
+        label=f"compartment {compartment_index} fit area",
     )
     gaussian_overlap_axis.fill_between(
         common_grid,
@@ -980,7 +1126,14 @@ def plot_gaussian_component_mean_variance_scatter(
 class NoiseProcessNMDASpikesScriptTestCases(unittest.TestCase):
     """Manual long-running entry point using the iteration-21 fitted protocol."""
 
-    def _plot_and_check(self, result, brian2_result, experiment, show_plot):
+    def _plot_and_check(
+        self,
+        result,
+        brian2_result,
+        experiment,
+        show_plot,
+        show_gaussian_component_plot=SHOW_GAUSSIAN_COMPONENT_MEAN_VARIANCE_PLOT,
+    ):
         method = NoiseLimitMethod(result["method"])
         output_path = plot_single_noise_limit_method(
             result,
@@ -993,6 +1146,7 @@ class NoiseProcessNMDASpikesScriptTestCases(unittest.TestCase):
         histogram_comparison_path = plot_population_vs_compartment_histogram(
             result,
             experiment,
+            brian2_result=brian2_result,
             compartment_index=0,
             output_path=(
                 OUTPUT_DIR / f"{method.value}_population_vs_compartment_0.png"
@@ -1000,20 +1154,25 @@ class NoiseProcessNMDASpikesScriptTestCases(unittest.TestCase):
             show_plot=show_plot,
         )
         self.assertTrue(histogram_comparison_path.exists())
-        gaussian_scatter_path = plot_gaussian_component_mean_variance_scatter(
-            result,
-            experiment,
-            output_path=OUTPUT_DIR / f"{method.value}_gaussian_mean_variance.png",
-            show_plot=show_plot,
-        )
-        self.assertTrue(gaussian_scatter_path.exists())
+        if show_gaussian_component_plot:
+            gaussian_scatter_path = plot_gaussian_component_mean_variance_scatter(
+                result,
+                experiment,
+                output_path=OUTPUT_DIR / f"{method.value}_gaussian_mean_variance.png",
+                show_plot=show_plot,
+            )
+            self.assertTrue(gaussian_scatter_path.exists())
         return result, output_path
 
-    def test_simulate_and_plot_stratonovich_heun(self, show_plot=True):
+    def test_simulate_and_plot_stratonovich_heun(
+        self,
+        show_plot=True,
+        show_gaussian_component_plot=SHOW_GAUSSIAN_COMPONENT_MEAN_VARIANCE_PLOT,
+    ):
         """Create settings, run stochastic Heun, then plot its result."""
         experiment = (
             AmpaNmdaExperimentConfig.from_fitted_apic20()
-            .with_property(r_e=25 * Hz)
+            .with_property(r_e=25 * Hz, w_ampa=0 * nS)
         )
         brian2_result = (
             simulate_ampa_nmda_single_compartment_ensemble_with_summed_nmda_input(
@@ -1021,18 +1180,26 @@ class NoiseProcessNMDASpikesScriptTestCases(unittest.TestCase):
             )
         )
         result = simulate_stratonovich_heun(experiment)
-        return self._plot_and_check(result, brian2_result, experiment, show_plot)
+        return self._plot_and_check(
+            result,
+            brian2_result,
+            experiment,
+            show_plot,
+            show_gaussian_component_plot,
+        )
 
         """Run only the Stratonovich stochastic-Heun simulation."""
         self.first_sim(show_plot)
 
     def test_simulate_and_plot_ito_corrected_euler_maruyama(
-        self, show_plot=True
+        self,
+        show_plot=True,
+        show_gaussian_component_plot=SHOW_GAUSSIAN_COMPONENT_MEAN_VARIANCE_PLOT,
     ):
         """Create settings, run corrected Itô Euler-Maruyama, then plot."""
         experiment = (
             AmpaNmdaExperimentConfig.from_fitted_apic20()
-            .with_property(r_e=25 * Hz, dt=0.01 * ms)
+            .with_property(r_e=25 * Hz, dt=0.01 * ms, w_ampa=0 * nS)
         )
         brian2_result = (
             simulate_ampa_nmda_single_compartment_ensemble_with_summed_nmda_input(
@@ -1040,15 +1207,23 @@ class NoiseProcessNMDASpikesScriptTestCases(unittest.TestCase):
             )
         )
         result = simulate_ito_corrected_euler_maruyama(experiment)
-        return self._plot_and_check(result, brian2_result, experiment, show_plot)
+        return self._plot_and_check(
+            result,
+            brian2_result,
+            experiment,
+            show_plot,
+            show_gaussian_component_plot,
+        )
 
     def test_simulate_and_plot_stratonovich_as_ito_euler_maruyama(
-        self, show_plot=True
+        self,
+        show_plot=True,
+        show_gaussian_component_plot=SHOW_GAUSSIAN_COMPONENT_MEAN_VARIANCE_PLOT,
     ):
         """Create settings, run uncorrected Euler-Maruyama, then plot."""
         experiment = (
             AmpaNmdaExperimentConfig.from_fitted_apic20()
-            .with_property(r_e=25 * Hz, dt=0.01 * ms)
+            .with_property(r_e=25 * Hz, dt=0.01 * ms,  w_ampa=0 * nS)
         )
         brian2_result = (
             simulate_ampa_nmda_single_compartment_ensemble_with_summed_nmda_input(
@@ -1056,13 +1231,29 @@ class NoiseProcessNMDASpikesScriptTestCases(unittest.TestCase):
             )
         )
         result = simulate_stratonovich_as_ito_euler_maruyama(experiment)
-        return self._plot_and_check(result, brian2_result, experiment, show_plot)
+        return self._plot_and_check(
+            result,
+            brian2_result,
+            experiment,
+            show_plot,
+            show_gaussian_component_plot,
+        )
 
-    def test_simulate_and_plot_all_methods(self, show_plot=True):
+    def test_simulate_and_plot_all_methods(
+        self,
+        show_plot=True,
+        show_gaussian_component_plot=SHOW_GAUSSIAN_COMPONENT_MEAN_VARIANCE_PLOT,
+    ):
         """Aggregate the three concrete simulation/plot workflows."""
-        self.test_simulate_and_plot_stratonovich_heun(show_plot)
-        self.test_simulate_and_plot_ito_corrected_euler_maruyama(show_plot)
-        self.simulate_ito_corrected_euler_maruyama(show_plot)
+        self.test_simulate_and_plot_stratonovich_heun(
+            show_plot, show_gaussian_component_plot
+        )
+        self.test_simulate_and_plot_ito_corrected_euler_maruyama(
+            show_plot, show_gaussian_component_plot
+        )
+        self.test_simulate_and_plot_stratonovich_as_ito_euler_maruyama(
+            show_plot, show_gaussian_component_plot
+        )
 
 
 if __name__ == "__main__":
