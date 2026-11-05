@@ -43,7 +43,7 @@ def _noise_statistics(experiment):
     c_x = experiment.alpha_nmda * experiment.w_nmda * experiment.tau_nmda_rise
     total_rate = experiment.n_nmda * experiment.r_e
     s0 = total_rate * c_x * experiment.tau_nmda_decay
-    d_s = total_rate * c_x**2 * experiment.tau_nmda_decay**2 / 2
+    d_s = 0.15*total_rate * c_x**2 * experiment.tau_nmda_decay**2 / 2
     return s0, d_s
 
 
